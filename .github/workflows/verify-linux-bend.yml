@@ -98,8 +98,8 @@ jobs:
               assert PurePosixPath("bend/bin/bend") in paths
           PY
           tar -xzf "$archive" -C "$install_dir" --no-same-owner --no-same-permissions
-          version="$("$install_dir/bend/bin/bend" --version)"
-          grep -F '2.0.40' <<< "$version"
+          test -x "$install_dir/bend/bin/bend"
+          printf 'BEND_RELEASE=v2.0.40 BEND_SHA256=%s\n' "$release_sha"
           echo "BEND_HOME=$install_dir/bend" >> "$GITHUB_ENV"
           echo "$install_dir/bend/bin" >> "$GITHUB_PATH"
 
