@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           test "$(uname -s)-$(uname -m)" = Linux-x86_64
-          df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { exit ($4 < 13631488) }'
+          df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { exit ($4 < 16777216) }'
           . /etc/os-release
           printf 'OS=%s %s ARCH=%s\n' "$ID" "$VERSION_ID" "$(uname -m)"
 
@@ -102,6 +102,25 @@ jobs:
           printf 'BEND_RELEASE=v2.0.40 BEND_SHA256=%s\n' "$release_sha"
           echo "BEND_HOME=$install_dir/bend" >> "$GITHUB_ENV"
           echo "$install_dir/bend/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned Lean for BendTT
+        shell: bash
+        run: |
+          install_dir="$(mktemp -d "$RUNNER_TEMP/lean.XXXXXXXX")"
+          archive="$install_dir/lean.tar.zst"
+          release_url=https://github.com/leanprover/lean4/releases/download/v4.34.0/lean-4.34.0-linux.tar.zst
+          release_sha=caaa98356098c85dc0fcbbd28e1ec66f39eb6551829972b752ff20e1286b646b
+          curl --fail --silent --show-error --location --proto '=https' \
+            --connect-timeout 15 --max-time 180 --max-filesize 580367391 \
+            --retry 2 --output "$archive" "$release_url"
+          test "$(stat -c %s "$archive")" = 580367391
+          echo "$release_sha  $archive" | sha256sum --check
+          tar --zstd -xf "$archive" -C "$install_dir" --strip-components=1 \
+            --no-same-owner --no-same-permissions
+          rm -- "$archive"
+          version="$("$install_dir/bin/lean" --version)"
+          grep -E 'version 4\.34\.0([ ,]|$)' <<< "$version"
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
 
       - name: Check the Bend model proofs
         shell: bash
