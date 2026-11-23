@@ -13,7 +13,8 @@ import (
 )
 
 type Manager struct {
-	znnStorage db.ZnnStorage
+	znnStorage      db.ZnnStorage
+	redeemIncidents *wrap.RedeemIncidentStore
 	// key is the chainId of the network
 	evmMu      sync.RWMutex
 	evmStorage map[uint32]db.EvmStorage
@@ -32,10 +33,11 @@ func NewDbManager(stop chan os.Signal) (*Manager, error) {
 	}
 
 	newDbManager := &Manager{
-		znnStorage: wrap.NewZnnStorage(zdb.NewLevelDBWrapper(newZnnLdb), stop),
-		evmStorage: make(map[uint32]db.EvmStorage),
-		stopChan:   stop,
-		logger:     newLogger,
+		redeemIncidents: wrap.NewRedeemIncidentStore(newZnnLdb),
+		znnStorage:      wrap.NewZnnStorage(zdb.NewLevelDBWrapper(newZnnLdb), stop),
+		evmStorage:      make(map[uint32]db.EvmStorage),
+		stopChan:        stop,
+		logger:          newLogger,
 	}
 	return newDbManager, nil
 }
@@ -66,6 +68,10 @@ func (m *Manager) AddEvmEventStore(chainId uint32, name string, contractDeployme
 			m.logger.Error(err)
 		}
 	}, nil
+}
+
+func (m *Manager) RedeemIncidents() *wrap.RedeemIncidentStore {
+	return m.redeemIncidents
 }
 
 func (m *Manager) ZnnStorage() db.ZnnStorage {

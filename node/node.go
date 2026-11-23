@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	wallet2 "github.com/MoonBaZZe/znn-sdk-go/wallet"
-	zcommon "github.com/zenon-network/go-zenon/common"
 	"io"
 	"math/big"
 	"net/http"
@@ -109,6 +108,9 @@ func NewNode(config *oconfig.Config, logger *zap.Logger) (_ *Node, initErr error
 		}
 	}
 	if node.dbManager, err = manager.NewDbManager(node.stopChan); err != nil {
+		return nil, err
+	}
+	if err := node.state.RestoreRedeemIncidents(node.dbManager.RedeemIncidents()); err != nil {
 		return nil, err
 	}
 	node.logger.Info("dbMan")
@@ -366,6 +368,18 @@ func (node *Node) processSignatures() {
 			node.logger.Debug(err.Error())
 			time.Sleep(5 * time.Second)
 			continue
+		}
+
+		if generation := node.state.RedeemHaltGeneration(); generation != 0 {
+			currentState = common.EmergencyState
+			// The durable incident can outlive the process that submitted the
+			// halt transactions. Verify the actual flags before clearing it.
+			halted, err := node.networksManager.ConfirmRedeemHalt(node.state, generation)
+			if err != nil {
+				node.logger.Warnf("Cannot confirm bridge halt: %v", err)
+			} else if halted {
+				continue
+			}
 		}
 
 		if node.state.GetIsAdministratorActive() {
@@ -1004,18 +1018,9 @@ func (node *Node) processSignatures() {
 								continue
 							}
 							//node.logger.Debugf("Set wrap %s status as true", wrap.Id.String())
-						} else {
-							status := common.PendingRedeemStatus
-							if redeemStatus.BlockNumber.Cmp(zcommon.BigP256) == 0 {
-								status = common.RedeemedStatus
-							}
-
-							if errStorage := node.networksManager.Znn().SetWrapEventStatus(event.Id, status); errStorage != nil {
-								node.logger.Error(errGetWrap)
-								node.stopChan <- syscall.SIGINT
-								continue
-							}
 						}
+						// A positive latest-state lookup suppresses re-signing. Only the
+						// finalized EVM events distinguish redemption from revocation.
 					}
 				}
 				pageIndex++
@@ -1026,6 +1031,17 @@ func (node *Node) processSignatures() {
 			}
 		}
 	}
+}
+
+func (node *Node) requireLiveTransfers() error {
+	state, err := node.state.GetState()
+	if err != nil {
+		return err
+	}
+	if state != common.LiveState {
+		return errors.New("bridge is no longer live for transfers")
+	}
+	return nil
 }
 
 // ok == true we had a signing ceremony
@@ -1136,6 +1152,9 @@ func (node *Node) processSignaturesWrap(window uint64) (error, bool) {
 		}
 		store.Selected(snapshot.Wrap, window, counts)
 	}
+	if err := node.requireLiveTransfers(); err != nil {
+		return err, true
+	}
 	response, err := node.signMessages(messagesToSign, msgsIndexes)
 	if err != nil {
 		return err, true
@@ -1143,6 +1162,10 @@ func (node *Node) processSignaturesWrap(window uint64) (error, bool) {
 		node.logger.Debug(response.Status)
 		node.logger.Debug(" error signing wrap")
 		return nil, true
+	}
+
+	if err := node.requireLiveTransfers(); err != nil {
+		return err, true
 	}
 
 	// we apply the signatures that don't return error
@@ -1269,14 +1292,7 @@ func (node *Node) processSignaturesUnwrap(number, size uint64) (error, bool) {
 		}
 		// The listener can enter emergency mode during agreement or either RPC
 		// read. Check live state last, immediately before requesting signatures.
-		state, err := node.state.GetState()
-		if err != nil {
-			return err
-		}
-		if state != common.LiveState {
-			return errors.New("node is no longer live before unwrap signing")
-		}
-		return nil
+		return node.requireLiveTransfers()
 	})
 	if err != nil {
 		return err, true
@@ -1286,6 +1302,9 @@ func (node *Node) processSignaturesUnwrap(number, size uint64) (error, bool) {
 		return nil, true
 	}
 
+	if err := node.requireLiveTransfers(); err != nil {
+		return err, true
+	}
 	sortSignatures(response, msgsIndexes)
 	for idx, sig := range response.Signatures {
 		signature, err := base64.StdEncoding.DecodeString(sig.Signature)
@@ -1447,6 +1466,9 @@ func (node *Node) sendSignaturesWrap(seenEventsCount map[string]uint32) {
 		seenEventsCount[req.Id.String()] += 1
 		if producerPubKey == node.getParticipant(index) {
 			node.logger.Info("[sendSignaturesWrap] this is me")
+			if err := node.requireLiveTransfers(); err != nil {
+				return
+			}
 			err = node.networksManager.UpdateWrapRequest(req.Id, req.Signature, node.producerKeyPair)
 			if err != nil {
 				node.logger.Debug(err)
@@ -1488,6 +1510,9 @@ func (node *Node) sendUnwrapRequests(seenEventsCount map[string]uint32) {
 			if len(req.Signature) == 0 {
 				node.logger.Debug("signature missing")
 				continue
+			}
+			if err := node.requireLiveTransfers(); err != nil {
+				return
 			}
 			err = node.networksManager.SendUnwrapRequest(req, node.producerKeyPair)
 			if err != nil {

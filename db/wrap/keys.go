@@ -1,5 +1,9 @@
 package wrap
 
+// Keyed by destination EVM chain and Zenon wrap ID. Prefixes 4 and 5 store incident evidence.
+const legacyRedeemStatusPrefix byte = 6 // Included provisional events in earlier PR builds.
+const redeemStatusPrefix byte = 7
+
 var (
 	wrapEventPrefix = []byte{0}
 

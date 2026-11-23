@@ -5,6 +5,7 @@ import (
 	"orchestrator/common"
 	"orchestrator/db"
 	"os"
+	"sync"
 )
 
 func getStorageIterator() []byte {
@@ -15,13 +16,14 @@ func getStorageIterator() []byte {
 type eventStore struct {
 	zdb.DB
 	stopChan chan os.Signal
+	mu       *sync.Mutex
 }
 
 func (es *eventStore) Storage() zdb.DB {
 	return zdb.DisableNotFound(es.DB.Subset(getStorageIterator()))
 }
 func (es *eventStore) Snapshot() db.ZnnStorage {
-	return NewZnnStorage(es.DB.Snapshot(), es.stopChan)
+	return &eventStore{DB: es.DB.Snapshot(), stopChan: es.stopChan, mu: es.mu}
 }
 
 func (es *eventStore) SendSigInt() {
@@ -35,5 +37,6 @@ func NewZnnStorage(db zdb.DB, stopChan chan os.Signal) db.ZnnStorage {
 	return &eventStore{
 		DB:       db,
 		stopChan: stopChan,
+		mu:       new(sync.Mutex),
 	}
 }
