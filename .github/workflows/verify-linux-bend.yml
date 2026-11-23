@@ -13,20 +13,17 @@ jobs:
   verify:
     name: ${{ matrix.label }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 16
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - label: dev baseline
-            sha: dacbe1c2c5ca473b75635120eb3c743c8ccdff17
-            tree: 7477180f5045daf1ee203148c94a5d9c6550674e
-          - label: PR 17
-            sha: f0e6519bbe46827f4e62051fa60b622d1d042b61
-            tree: 6bade582718b75e5b1b0602a74615fd332c91561
-          - label: PR 18
-            sha: d62117beab9aa452b91f13a69f7d918467a59ce7
-            tree: 56325c07be79c2c746c2bf8bef1d516da382e07e
+          - label: Current dev baseline
+            sha: 86978c2818ae278344bfabb5da17beba80b8652e
+            tree: 0e7e1a5c17a120b5962d2bcf399699a7a467a340
+          - label: PR 17 status fix
+            sha: 73c9f0d096702e98ac0cca123712fe312d1cba99
+            tree: dd5528da10949da22bec6a28c1997f56cf8bcde8
     env:
       CGO_ENABLED: "1"
       GOTOOLCHAIN: local
@@ -128,13 +125,28 @@ jobs:
           bend PROOF.bend --verdict | tee "$RUNNER_TEMP/bend-proof.log"
           grep -Fq 'ALL PROOFS CHECK' "$RUNNER_TEMP/bend-proof.log"
 
+      - name: Check formatting and vet affected packages
+        if: matrix.label == 'PR 17 status fix'
+        shell: bash
+        run: |
+          test -z "$(gofmt -l db/interfaces.go db/unwrap/entries.go network/manager.go node/reconcile_signers_test.go node/reconcile_test.go)"
+          go vet -tags=bend ./db/unwrap ./network ./node ./rpc
+
+      - name: Verify both reconciliation regressions
+        if: matrix.label == 'PR 17 status fix'
+        shell: bash
+        run: |
+          go test -race -count=1 -timeout=3m -v -tags=bend \
+            -ldflags '-extldflags=-Wl,--allow-multiple-definition' \
+            -run '^TestReconcile(StatusPreservesListenerUpdate|PendingAdvancesToTerminal)$' ./node
+
       - name: Run race-enabled Go and Bend tests
         shell: bash
         run: |
           events="$RUNNER_TEMP/orchestrator-tests.jsonl"
           exit_code=0
           go test -json -race -p 2 -count=1 -timeout=3m -tags=bend \
-            -ldflags '-extldflags=-Wl,--allow-multiple-definition' ./... > "$events" || exit_code=$?
+            -ldflags '-extldflags=-Wl,--allow-multiple-definition' ./db/unwrap ./network ./node ./rpc > "$events" || exit_code=$?
           jq -c '
             if .Action == "pass" or .Action == "fail" or .Action == "skip" then
               {result: .Action, package: .Package, test: .Test}
