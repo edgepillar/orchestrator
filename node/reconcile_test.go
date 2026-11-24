@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	ecommon "github.com/ethereum/go-ethereum/common"
+	gethrpc "github.com/ethereum/go-ethereum/rpc"
 	"github.com/zenon-network/go-zenon/chain/nom"
 	zdb "github.com/zenon-network/go-zenon/common/db"
 	"github.com/zenon-network/go-zenon/common/types"
@@ -38,12 +39,13 @@ import (
 type signerLookup func(uint32) (*definition.UnwrapTokenRequest, error)
 
 type reconciliationChain struct {
-	inProcess  bool
-	ceremony   *fixtureCeremony
-	signingKey string
-	lookup     signerLookup
-	write      func(uint32, uint32) error
-	head       func() (*api.AccountBlockMarshal, error)
+	inProcess      bool
+	unwrapEvidence any
+	ceremony       *fixtureCeremony
+	signingKey     string
+	lookup         signerLookup
+	write          func(uint32, uint32) error
+	head           func() (*api.AccountBlockMarshal, error)
 	db.EvmStorage
 }
 
@@ -233,6 +235,17 @@ func (c reconciliationChain) openNetworks(t *testing.T, state *common.GlobalStat
 		t.Fatal(err)
 	}
 	cfg := config.BaseNetworkConfig{Urls: []string{url}}
+	evmCfg := cfg
+	if c.unwrapEvidence != nil {
+		evmRPC := gethrpc.NewServer()
+		t.Cleanup(evmRPC.Stop)
+		if err := evmRPC.RegisterName("eth", c.unwrapEvidence); err != nil {
+			t.Fatal(err)
+		}
+		evmEndpoint := httptest.NewServer(evmRPC)
+		t.Cleanup(evmEndpoint.Close)
+		evmCfg = config.BaseNetworkConfig{Urls: []string{evmEndpoint.URL}}
+	}
 	var stores *dbmanager.Manager
 	if c.signingKey != "" {
 		stores, err = dbmanager.NewDbManager(stop)
@@ -240,7 +253,7 @@ func (c reconciliationChain) openNetworks(t *testing.T, state *common.GlobalStat
 			t.Fatal(err)
 		}
 	}
-	if err := manager.Init(map[string]config.BaseNetworkConfig{common.ZenonNetworkName: cfg, "fixture": cfg}, stores, state, nil); err != nil {
+	if err := manager.Init(map[string]config.BaseNetworkConfig{common.ZenonNetworkName: cfg, "fixture": evmCfg}, stores, state, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(ordered) == 0 {
@@ -253,7 +266,7 @@ func (c reconciliationChain) openNetworks(t *testing.T, state *common.GlobalStat
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := manager.RpcManager().AddEvmClient(cfg, entry.id, name, ecommon.Address{}); err != nil {
+		if err := manager.RpcManager().AddEvmClient(evmCfg, entry.id, name, ecommon.Address{}); err != nil {
 			t.Fatal(err)
 		}
 		manager.AddEvmNetwork(net)
