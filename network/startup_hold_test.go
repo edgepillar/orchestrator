@@ -1580,15 +1580,19 @@ func TestNetworkAddedDuringAHeldStartThatFailsDoesNotStopASignerInAnEmergency(t 
 	h.expect("held", common.EmergencyState, blocked, false)
 }
 
-// runtimeStores also opens a store for a network the listener adds.
+// runtimeHeldStores also opens a store for a network the listener adds.
 type runtimeHeldStores struct {
-	replayStores
+	*heldReplayStores
 	stop chan os.Signal
 }
 
 func (s runtimeHeldStores) AddEvmEventStore(id uint32, _ string, height uint64) (func(), error) {
-	s.evm[id] = unwrap.NewEvmStorage(zdb.NewMemDB(), s.stop, height)
-	return func() { delete(s.evm, id) }, nil
+	s.setEvmStorage(id, unwrap.NewEvmStorage(zdb.NewMemDB(), s.stop, height))
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.evm, id)
+	}, nil
 }
 
 // The listener starts a network the bridge adds while the account is being
@@ -1605,7 +1609,7 @@ func TestNetworkAddedDuringTheFirstReadIsStartedOnce(t *testing.T) {
 	}
 	added := &definition.NetworkInfo{NetworkClass: definition.EvmClass, Id: 2, Name: "held-start-2", ContractAddress: h.bridge.contract.Hex()}
 	h.zenon.change(func(z *heldZenon) { z.networks = map[uint32]*definition.NetworkInfo{2: added} })
-	h.n.dbManager = runtimeHeldStores{h.stores, h.stop}
+	h.n.dbManager = runtimeHeldStores{&h.stores, h.stop}
 	h.n.networksInfo = map[string]config.BaseNetworkConfig{added.Name: {Urls: []string{second.url}}}
 	data, err := definition.ABIBridge.PackMethod(definition.SetNetworkMethodName, added.NetworkClass, added.Id, added.Name, added.ContractAddress, "")
 	if err != nil {
