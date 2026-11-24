@@ -1,0 +1,177 @@
+name: Qualify PR 26 on the current dev branch
+on:
+  push:
+    branches:
+      - codex/linux-bend-pr26-current-dev
+    paths:
+      - .github/workflows/qualify-pr26-current-dev.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 32
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Current PR 26 and signing fixtures
+            sha: ${{ github.sha }}
+    env:
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GOFLAGS: "-mod=readonly"
+    steps:
+      - name: Check runner and reserve disk space
+        shell: bash
+        run: |
+          test "$(uname -s)-$(uname -m)" = Linux-aarch64
+          df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { exit ($4 < 16777216) }'
+          . /etc/os-release
+          printf 'OS=%s %s ARCH=%s\n' "$ID" "$VERSION_ID" "$(uname -m)"
+
+      - name: Check out the source under test
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: edgepillar/orchestrator
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+          fetch-depth: 5
+
+      - name: Verify the source pin
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ matrix.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "fb5dbc3491c7afd7c8df0d5a5acadb73840c89b9"
+          test -z "$(git status --porcelain)"
+          printf 'SOURCE_COMMIT=%s SOURCE_TREE=%s\n' "$SOURCE_SHA" "$(git rev-parse HEAD^{tree})"
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.22.12"
+          cache: false
+
+      - name: Install pinned Bend
+        shell: bash
+        run: |
+          test "$(go version)" = 'go version go1.22.12 linux/arm64'
+          go version
+          install_dir="$(mktemp -d "$RUNNER_TEMP/bend.XXXXXXXX")"
+          archive="$install_dir/bend.tar.gz"
+          release_url=https://github.com/bendlang/bend/releases/download/v2.0.40/bend-2.0.40-linux-arm64.tar.gz
+          release_sha=2f42a6fa34ecdaa71ae105e5fa734f9a07e129d333e45448ab6d2ff03a837570
+          curl --fail --silent --show-error --location --proto '=https' \
+            --connect-timeout 15 --max-time 120 --max-filesize 35949294 \
+            --retry 2 --output "$archive" "$release_url"
+          test "$(stat -c %s "$archive")" = 35949294
+          echo "$release_sha  $archive" | sha256sum --check
+          python3 - "$archive" <<'PY'
+          from pathlib import PurePosixPath
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1], "r:gz") as tar:
+              total_size = 0
+              paths = set()
+              for entry in tar:
+                  name = PurePosixPath(entry.name)
+                  assert name.parts and name.parts[0] == "bend"
+                  assert ".." not in name.parts and name not in paths
+                  assert entry.isfile() or entry.isdir()
+                  paths.add(name)
+                  total_size += entry.size
+                  assert len(paths) <= 10000 and total_size <= 256 * 1024 * 1024
+              assert PurePosixPath("bend/bin/bend") in paths
+          PY
+          tar -xzf "$archive" -C "$install_dir" --no-same-owner --no-same-permissions
+          test -x "$install_dir/bend/bin/bend"
+          printf 'BEND_RELEASE=v2.0.40 BEND_SHA256=%s\n' "$release_sha"
+          echo "BEND_HOME=$install_dir/bend" >> "$GITHUB_ENV"
+          echo "$install_dir/bend/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned Lean for BendTT
+        shell: bash
+        run: |
+          install_dir="$(mktemp -d "$RUNNER_TEMP/lean.XXXXXXXX")"
+          archive="$install_dir/lean.tar.zst"
+          release_url=https://github.com/leanprover/lean4/releases/download/v4.34.0/lean-4.34.0-linux_aarch64.tar.zst
+          release_sha=40b04fdb7fb849d3c80e10c3bbeebc7b7354b6d3f07450b9168c2149b40d2a82
+          curl --fail --silent --show-error --location --proto '=https' \
+            --connect-timeout 15 --max-time 180 --max-filesize 581973544 \
+            --retry 2 --output "$archive" "$release_url"
+          test "$(stat -c %s "$archive")" = 581973544
+          echo "$release_sha  $archive" | sha256sum --check
+          tar --zstd -xf "$archive" -C "$install_dir" --strip-components=1 \
+            --no-same-owner --no-same-permissions
+          rm -- "$archive"
+          version="$("$install_dir/bin/lean" --version)"
+          grep -E 'version 4\.34\.0([ ,]|$)' <<< "$version"
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
+
+      - name: Check the Bend model proofs
+        id: proofs
+        shell: bash
+        run: |
+          bend PROOF.bend --verdict | tee "$RUNNER_TEMP/bend-proof.log"
+          grep -Fq 'ALL PROOFS CHECK' "$RUNNER_TEMP/bend-proof.log"
+
+      - name: Check build and vet
+        shell: bash
+        run: |
+          go build -buildvcs=false -ldflags '-extldflags=-Wl,--allow-multiple-definition' ./...
+          go vet ./...
+          go vet -tags=bend ./...
+
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          gofmt -d db/interfaces.go db/wrap/redeem_status.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go node/reconcile_test.go verification/testdata/split_tip_transport_test.go
+          test -z "$(gofmt -l db/interfaces.go db/wrap/redeem_status.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go node/reconcile_test.go verification/testdata/split_tip_transport_test.go)"
+
+      - name: Run the full race-enabled Bend suite
+        if: ${{ !cancelled() && steps.proofs.outcome == 'success' }}
+        shell: bash
+        run: |
+          events="$RUNNER_TEMP/qualification.jsonl"
+          rc=0
+          go test -json -race -p 2 -count=1 -timeout=20m -tags=bend -buildvcs=false \
+            -ldflags '-extldflags=-Wl,--allow-multiple-definition' ./... > "$events" || rc=$?
+          python3 - "$events" "$rc" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              rows = [json.loads(line) for line in stream]
+          failed = {(row.get("Package"), row.get("Test")) for row in rows if row.get("Action") == "fail"}
+          emitted = 0
+          for row in rows:
+              action = row.get("Action")
+              package, name = row.get("Package"), row.get("Test")
+              if action in ("pass", "fail", "skip"):
+                  print("TEST_RESULT " + json.dumps({"action": action, "package": package, "test": name}))
+                  continue
+              if action != "output" or (package, name) not in failed:
+                  continue
+              message = row.get("Output", "").strip()
+              if not re.search(r'\b[a-zA-Z0-9_]+_test\.go:\d+:|Bend comparison failed|WARNING: DATA RACE|panic:', message):
+                  continue
+              message = message.replace(os.environ["RUNNER_TEMP"], "<runner-temp>").replace(os.environ["GITHUB_WORKSPACE"], "<source>")
+              message = re.sub(r'\b(?:gh[pousr]_[a-zA-Z0-9_]+|github_pat_[a-zA-Z0-9_]+)', "<redacted>", message)
+              if re.search(r'(?i)\b(?:private key|seed phrase|mnemonic|password|access token)\s*[:=]', message):
+                  continue
+              if emitted < 160 and len(message) < 4000:
+                  print("TEST_ERROR " + json.dumps({"package": package, "test": name, "output": message}))
+                  emitted += 1
+          print("GO_TEST_EXIT", sys.argv[2])
+          PY
+          exit "$rc"
+
