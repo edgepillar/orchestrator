@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	sdk_rpc_client "github.com/MoonBaZZe/znn-sdk-go/rpc_client"
 	"github.com/MoonBaZZe/znn-sdk-go/zenon"
 	ic "github.com/libp2p/go-libp2p-core/crypto"
@@ -227,6 +228,20 @@ func (r *ZnnRpc) GetAllUnsignedWrapTokenRequests(pageIndex, pageSize uint32) (*e
 
 func (r *ZnnRpc) GetWrapTokenRequestById(id types.Hash) (*definition.WrapTokenRequest, error) {
 	return r.rpcClient.BridgeApi.GetWrapTokenRequestById(id)
+}
+
+// RedeemWrapRequestById is the source lookup of the redeem check. That check
+// repeats on a timer, so the read is bounded: an endpoint that accepts the
+// request and never answers must not stop the rechecks behind it. An unknown
+// id is reported as an error, see WrapNotFound.
+func (r *ZnnRpc) RedeemWrapRequestById(id types.Hash) (*definition.WrapTokenRequest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ZnnLedgerTimeout)
+	defer cancel()
+	var raw json.RawMessage
+	if err := r.settingsClient.CallContext(ctx, &raw, "embedded.bridge.getWrapTokenRequestById", id); err != nil {
+		return nil, err
+	}
+	return decodeRedeemWrap(raw)
 }
 
 func (r *ZnnRpc) GetUnwrapTokenRequestByHashAndLog(txHash types.Hash, logIndex uint32) (*definition.UnwrapTokenRequest, error) {
