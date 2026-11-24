@@ -532,6 +532,16 @@ func TestLiveLoopRetriesExpiredUnwrap(t *testing.T) {
 
 func TestEmergencyAfterAgreementStopsBridgeSigning(t *testing.T) {
 	f := newWindowTransport(t)
+	completeHaltAndResume := func() {
+		t.Helper()
+		// The production state machine waits for a completed halt before
+		// an administrator can resume the bridge.
+		for _, next := range []uint8{common.HaltedState, common.LiveState} {
+			if err := f.first.node.state.SetState(next); err != nil {
+				t.Fatalf("set state %d: %v", next, err)
+			}
+		}
+	}
 	f.onAgreement = func() {
 		if err := f.first.node.state.SetState(common.EmergencyState); err != nil {
 			t.Fatal(err)
@@ -543,9 +553,7 @@ func TestEmergencyAfterAgreementStopsBridgeSigning(t *testing.T) {
 	}
 	// The state can also change while the signer is fetching its final
 	// window snapshot. A state check made before that read is too early.
-	if err := f.first.node.state.SetState(common.LiveState); err != nil {
-		t.Fatal(err)
-	}
+	completeHaltAndResume()
 	f.onAgreement = func() {
 		chain := f.first.chain
 		chain.mu.Lock()
@@ -561,9 +569,7 @@ func TestEmergencyAfterAgreementStopsBridgeSigning(t *testing.T) {
 		t.Fatalf("emergency during final chain read: bridge requests=%d err=%v", f.bridgeCalls, err)
 	}
 	f.onAgreement = nil
-	if err := f.first.node.state.SetState(common.LiveState); err != nil {
-		t.Fatal(err)
-	}
+	completeHaltAndResume()
 	if err := f.first.attempt(t, 1751, 100); err != nil || f.bridgeCalls != 1 {
 		t.Fatalf("live signer could not retry original pool: bridge requests=%d err=%v", f.bridgeCalls, err)
 	}
