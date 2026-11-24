@@ -18,17 +18,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: Combined source with live startup fixture
-            sha: 2aaa98c9e1a64a14ac78f2682abd47f75e480ebb
-            parent: db028cba665de2c832cc7c7462e2b3a48cf890ae
-            merge_parent: ""
-            expected_tree: b23ddb139a14972f380ed0e1268fa17cb486a7c0
-            candidate: true
-          - label: Combined source with verified unwrap fixes
-            sha: 6346864d6c687fdbb34883215be0666de6ec7c8b
+          - label: Merged source after halt fixture fixes
+            sha: 813d5245628987d3d2f0b2ba2f9d847d7b0a4af0
             parent: 2aaa98c9e1a64a14ac78f2682abd47f75e480ebb
             merge_parent: ""
-            expected_tree: 6629128c37d9f9ec3736f52dab543cccfca77c67
+            expected_tree: 97c32076aa3af4d2c759b796218870905d38e6bf
+            candidate: true
+          - label: Merged unwrap diagnostic after halt fixture fixes
+            sha: a15d74637d2d39db062c029330ff1ae79fada241
+            parent: 813d5245628987d3d2f0b2ba2f9d847d7b0a4af0
+            merge_parent: ""
+            expected_tree: 393de22037e7ee7ff62add0c480c17f004253178
             candidate: true
     env:
       CGO_ENABLED: "1"
@@ -152,8 +152,33 @@ jobs:
         if: matrix.candidate
         shell: bash
         run: |
-          gofmt -d common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go verification/testdata/split_tip_transport_test.go
-          test -z "$(gofmt -l common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go verification/testdata/split_tip_transport_test.go)"
+          gofmt -d common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go verification/testdata/split_tip_transport_test.go network/startup_hold_test.go network/startup_networks_test.go
+          test -z "$(gofmt -l common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go verification/testdata/split_tip_transport_test.go network/startup_hold_test.go network/startup_networks_test.go)"
+
+      - name: Stress the startup and administrator halt regressions
+        shell: bash
+        run: |
+          result="$RUNNER_TEMP/halt-regressions.log"
+          rc=0
+          go test -race -p 2 -count=16 -timeout=5m -tags=bend -buildvcs=false \
+            -ldflags '-extldflags=-Wl,--allow-multiple-definition' \
+            -run '^(TestNetworkAddedWhileTheHaltFlagsAreReadIsLookedAt|TestAdministratorHaltKeepsEachWorkerOnItsNetwork)$' ./network > "$result" 2>&1 || rc=$?
+          python3 - "$result" "$rc" <<'PY'
+          import os
+          import re
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              for i, line in enumerate(stream):
+                  if i >= 180:
+                      break
+                  if re.search(r'(?i)\b(?:private key|seed phrase|mnemonic|password|access token)\s*[:=]', line):
+                      continue
+                  line = line.replace(os.environ["GITHUB_WORKSPACE"], "<source>").replace(os.environ["RUNNER_TEMP"], "<runner-temp>")
+                  line = re.sub(r'\b(?:gh[pousr]_[a-zA-Z0-9_]+|github_pat_[a-zA-Z0-9_]+)', "<redacted>", line)
+                  print("HALT_FOCUS_LOG " + line.rstrip()[:900])
+          print("HALT_FOCUS_EXIT", sys.argv[2])
+          PY
+          exit "$rc"
 
       - name: Run the full race-enabled Bend suite
         shell: bash
