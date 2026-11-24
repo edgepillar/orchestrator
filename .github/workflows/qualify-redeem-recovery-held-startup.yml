@@ -19,16 +19,16 @@ jobs:
       matrix:
         include:
           - label: Merged source after halt fixture fixes
-            sha: 813d5245628987d3d2f0b2ba2f9d847d7b0a4af0
-            parent: 2aaa98c9e1a64a14ac78f2682abd47f75e480ebb
-            merge_parent: ""
-            expected_tree: 97c32076aa3af4d2c759b796218870905d38e6bf
-            candidate: true
-          - label: Merged unwrap diagnostic after halt fixture fixes
-            sha: a15d74637d2d39db062c029330ff1ae79fada241
+            sha: ba477254c82ba7dcf64e33be1f21f600b840df41
             parent: 813d5245628987d3d2f0b2ba2f9d847d7b0a4af0
             merge_parent: ""
-            expected_tree: 393de22037e7ee7ff62add0c480c17f004253178
+            expected_tree: c7a47747742317da34d8608dd2f435a63ec484a3
+            candidate: true
+          - label: Merged unwrap diagnostic after halt fixture fixes
+            sha: 1e10000387b97b7d862ee0dc7c5318e377808640
+            parent: ba477254c82ba7dcf64e33be1f21f600b840df41
+            merge_parent: ""
+            expected_tree: 9b8bcbd04642f6d52273409b8b73dcb0b96a2622
             candidate: true
     env:
       CGO_ENABLED: "1"
