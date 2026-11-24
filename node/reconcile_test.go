@@ -38,12 +38,13 @@ import (
 type signerLookup func(uint32) (*definition.UnwrapTokenRequest, error)
 
 type reconciliationChain struct {
-	inProcess  bool
-	ceremony   *fixtureCeremony
-	signingKey string
-	lookup     signerLookup
-	write      func(uint32, uint32) error
-	head       func() (*api.AccountBlockMarshal, error)
+	inProcess      bool
+	unwrapEvidence any
+	ceremony       *fixtureCeremony
+	signingKey     string
+	lookup         signerLookup
+	write          func(uint32, uint32) error
+	head           func() (*api.AccountBlockMarshal, error)
 	db.EvmStorage
 }
 
@@ -214,6 +215,11 @@ func (c reconciliationChain) openNetworks(t *testing.T, state *common.GlobalStat
 	}
 	if err := srv.RegisterName("ledger", fixtureLedger{frontier: c.head, ceremony: c.ceremony}); err != nil {
 		t.Fatal(err)
+	}
+	if c.unwrapEvidence != nil {
+		if err := srv.RegisterName("eth", c.unwrapEvidence); err != nil {
+			t.Fatal(err)
+		}
 	}
 	url := "http://source-evidence.invalid"
 	var stopHTTP func()

@@ -22,6 +22,9 @@ import (
 	tcommon "github.com/HyperCore-Team/go-tss/common"
 	"github.com/HyperCore-Team/go-tss/conversion"
 	"github.com/HyperCore-Team/go-tss/keysign"
+	ecommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	etypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/zenon-network/go-zenon/chain/nom"
 	zdb "github.com/zenon-network/go-zenon/common/db"
@@ -34,6 +37,7 @@ import (
 	"go.uber.org/zap"
 
 	"orchestrator/common"
+	"orchestrator/common/bridge"
 	"orchestrator/common/config"
 	"orchestrator/common/events"
 	"orchestrator/tss"
@@ -69,6 +73,65 @@ func newSigningPeer(t *testing.T, tip byte, key string) *signingPeer {
 	return buildSigningPeer(t, tip, key, "")
 }
 
+const (
+	signingUnwrapHeight = 100
+	signingUnwrapDepth  = 3
+)
+
+type signingUnwrapSource struct {
+	receipt *etypes.Receipt
+}
+
+func newSigningUnwrapSource(t *testing.T, requests []*events.UnwrapRequestEvm) *signingUnwrapSource {
+	t.Helper()
+	contract, err := bridge.BridgeMetaData.GetAbi()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := &etypes.Receipt{
+		TxHash:      signerTestTx,
+		BlockHash:   ecommon.Hash{1},
+		BlockNumber: big.NewInt(signingUnwrapHeight),
+		Status:      etypes.ReceiptStatusSuccessful,
+	}
+	sender := ecommon.Address{1}
+	for _, request := range requests {
+		data, err := contract.Events["Unwrapped"].Inputs.NonIndexed().Pack(request.To, request.Amount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt.Logs = append(receipt.Logs, &etypes.Log{
+			BlockNumber: signingUnwrapHeight,
+			BlockHash:   receipt.BlockHash,
+			TxHash:      request.TransactionHash,
+			Index:       uint(request.LogIndex),
+			Topics:      []ecommon.Hash{common.UnwrapSigHash, ecommon.BytesToHash(sender[:]), ecommon.BytesToHash(request.Token[:])},
+			Data:        data,
+		})
+	}
+	return &signingUnwrapSource{receipt: receipt}
+}
+
+func (s *signingUnwrapSource) GetTransactionReceipt(hash ecommon.Hash) *etypes.Receipt {
+	if hash == s.receipt.TxHash {
+		return s.receipt
+	}
+	return nil
+}
+
+func (s *signingUnwrapSource) GetBlockByNumber(height hexutil.Uint64, _ bool) map[string]any {
+	var hash ecommon.Hash
+	switch height {
+	case signingUnwrapHeight:
+		hash = s.receipt.BlockHash
+	case signingUnwrapHeight + signingUnwrapDepth:
+		hash = ecommon.Hash{2}
+	default:
+		return nil
+	}
+	return map[string]any{"hash": hash, "number": height}
+}
+
 func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, ordered ...fixtureNetwork) *signingPeer {
 	t.Helper()
 	events := candidates(6)
@@ -76,6 +139,7 @@ func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, order
 		event.To = types.ZeroAddress.String()
 	}
 	c := signerWithEvents(t, events)
+	c.unwrapEvidence = newSigningUnwrapSource(t, events)
 	c.ceremony = &fixtureCeremony{height: testCeremony * 10, size: 10}
 	c.signingKey = activeBridgeKey
 	c.head = func() (*api.AccountBlockMarshal, error) {
@@ -105,6 +169,9 @@ func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, order
 	}
 	state := common.NewGlobalState(new(uint8))
 	networks, _ := c.openNetworks(t, state, ordered...)
+	for _, source := range networks.Networks() {
+		source.SetConfirmationsToFinality(signingUnwrapDepth)
+	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
