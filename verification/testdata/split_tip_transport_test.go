@@ -81,7 +81,7 @@ const (
 )
 
 type signingUnwrapSource struct {
-	receipt *etypes.Receipt
+	receipts map[ecommon.Hash]*etypes.Receipt
 }
 
 func newSigningUnwrapSource(t *testing.T, requests []*events.UnwrapRequestEvm) *signingUnwrapSource {
@@ -90,14 +90,19 @@ func newSigningUnwrapSource(t *testing.T, requests []*events.UnwrapRequestEvm) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt := &etypes.Receipt{
-		TxHash:      signerTestTx,
-		BlockHash:   ecommon.Hash{1},
-		BlockNumber: big.NewInt(signingUnwrapHeight),
-		Status:      etypes.ReceiptStatusSuccessful,
-	}
+	receipts := make(map[ecommon.Hash]*etypes.Receipt)
 	sender := ecommon.Address{1}
 	for _, request := range requests {
+		receipt := receipts[request.TransactionHash]
+		if receipt == nil {
+			receipt = &etypes.Receipt{
+				TxHash:      request.TransactionHash,
+				BlockHash:   ecommon.Hash{1},
+				BlockNumber: big.NewInt(signingUnwrapHeight),
+				Status:      etypes.ReceiptStatusSuccessful,
+			}
+			receipts[request.TransactionHash] = receipt
+		}
 		data, err := contract.Events["Unwrapped"].Inputs.NonIndexed().Pack(request.To, request.Amount)
 		if err != nil {
 			t.Fatal(err)
@@ -111,21 +116,18 @@ func newSigningUnwrapSource(t *testing.T, requests []*events.UnwrapRequestEvm) *
 			Data:        data,
 		})
 	}
-	return &signingUnwrapSource{receipt: receipt}
+	return &signingUnwrapSource{receipts: receipts}
 }
 
 func (s *signingUnwrapSource) GetTransactionReceipt(hash ecommon.Hash) *etypes.Receipt {
-	if hash == s.receipt.TxHash {
-		return s.receipt
-	}
-	return nil
+	return s.receipts[hash]
 }
 
 func (s *signingUnwrapSource) GetBlockByNumber(height hexutil.Uint64, _ bool) map[string]any {
 	var hash ecommon.Hash
 	switch height {
 	case signingUnwrapHeight:
-		hash = s.receipt.BlockHash
+		hash = ecommon.Hash{1}
 	case signingUnwrapHeight + signingUnwrapDepth:
 		hash = ecommon.Hash{2}
 	default:
@@ -141,7 +143,6 @@ func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, order
 		event.To = types.ZeroAddress.String()
 	}
 	c := signerWithEvents(t, events)
-	c.unwrapEvidence = newSigningUnwrapSource(t, events)
 	c.ceremony = &fixtureCeremony{height: testCeremony * 10, size: 10}
 	c.signingKey = activeBridgeKey
 	bridgeHeight := new(atomic.Uint64)
@@ -158,6 +159,35 @@ func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, order
 			return stableLookup(i)
 		}
 	}
+	evidence := events
+	if len(ordered) > 0 {
+		evidence = nil
+		chainByTransaction := make(map[types.Hash]uint32)
+		for _, source := range ordered {
+			requests, err := source.store.GetUnsignedUnwrapRequests()
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence = append(evidence, requests...)
+			for _, request := range requests {
+				chainByTransaction[types.Hash(request.TransactionHash)] = request.ChainId
+			}
+		}
+		lookup := c.lookup
+		c.lookupRequest = func(hash types.Hash, index uint32) (*definition.UnwrapTokenRequest, error) {
+			chain, ok := chainByTransaction[hash]
+			if !ok {
+				return nil, errors.New("unexpected transaction")
+			}
+			record, err := lookup(index)
+			if record != nil {
+				record.TransactionHash = hash
+				record.ChainId = chain
+			}
+			return record, err
+		}
+	}
+	c.unwrapEvidence = newSigningUnwrapSource(t, evidence)
 	// All signers receive the same six valid transfers. Independently encode
 	// the four expected bridge messages to distinguish them from a commitment.
 	order := []int{1, 3, 4, 5}
@@ -706,6 +736,7 @@ func TestNetworkLoadOrderAtSigningTransport(t *testing.T) {
 		for _, r := range requests {
 			r.To = types.ZeroAddress.String()
 			r.ChainId = chain
+			r.TransactionHash = ecommon.Hash{byte(chain)}
 		}
 	}
 	// Logs 0 and 2 are already registered. Three signing slots leave one
