@@ -61,16 +61,12 @@ func NewDurableZnnStorage(raw *leveldb.DB, stopChan chan os.Signal) db.ZnnStorag
 // would not do: an earlier one can sit in a journal file that LevelDB has
 // already closed without a sync.
 //
-// The value goes through DB first, which owns the stored encoding, and the
-// stored bytes are then written again with a sync. Callers hold mu, so no
-// other write to the key comes between the two.
 func (es *eventStore) putDurable(key, value []byte) error {
-	if err := es.DB.Put(key, value); err != nil || es.raw == nil {
-		return err
+	if es.raw == nil {
+		return es.DB.Put(key, value)
 	}
-	stored, err := es.raw.Get(key, nil)
-	if err != nil {
-		return err
-	}
-	return es.raw.Put(key, stored, &opt.WriteOptions{Sync: true})
+	// Zenon's LevelDB wrapper prefixes existing values with a zero byte.
+	// Sync the encoded value in the original write so a failed sync cannot
+	// leave a visible row that the next attempt treats as already written.
+	return es.raw.Put(key, append([]byte{0}, value...), &opt.WriteOptions{Sync: true})
 }

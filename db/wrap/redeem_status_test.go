@@ -1,6 +1,7 @@
 package wrap
 
 import (
+	"errors"
 	"math/big"
 	"os"
 	"sync"
@@ -79,6 +80,7 @@ func TestRedeemStatusPreservesLegacyRowsAndConcurrentWrites(t *testing.T) {
 type journalSyncs struct {
 	storage.Storage
 	count *atomic.Int64
+	fail  *atomic.Bool
 }
 
 func (s journalSyncs) Create(fd storage.FileDesc) (storage.Writer, error) {
@@ -86,16 +88,22 @@ func (s journalSyncs) Create(fd storage.FileDesc) (storage.Writer, error) {
 	if err != nil || fd.Type != storage.TypeJournal {
 		return w, err
 	}
-	return syncCounter{w, s.count}, nil
+	return syncCounter{w, s.count, s.fail}, nil
 }
 
 type syncCounter struct {
 	storage.Writer
 	count *atomic.Int64
+	fail  *atomic.Bool
 }
+
+var errJournalSync = errors.New("journal sync failed")
 
 func (w syncCounter) Sync() error {
 	w.count.Add(1)
+	if w.fail != nil && w.fail.Swap(false) {
+		return errJournalSync
+	}
 	return w.Writer.Sync()
 }
 
@@ -104,7 +112,7 @@ func (w syncCounter) Sync() error {
 // not survive a power loss that these writes do not.
 func TestWrapRowsAndRedeemStatusesAreSynced(t *testing.T) {
 	syncs := new(atomic.Int64)
-	raw, err := leveldb.Open(journalSyncs{storage.NewMemStorage(), syncs}, nil)
+	raw, err := leveldb.Open(journalSyncs{Storage: storage.NewMemStorage(), count: syncs}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,5 +155,53 @@ func TestWrapRowsAndRedeemStatusesAreSynced(t *testing.T) {
 	}
 	if has, _ := raw.Has(redeemStatusKey(1, types.Hash{3}), nil); has {
 		t.Fatal("a snapshot write reached the file")
+	}
+}
+
+func TestRedeemWritesRetryAfterJournalSyncFailure(t *testing.T) {
+	syncs := new(atomic.Int64)
+	fail := new(atomic.Bool)
+	raw, err := leveldb.Open(journalSyncs{
+		Storage: storage.NewMemStorage(),
+		count:   syncs,
+		fail:    fail,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+
+	durable := NewDurableZnnStorage(raw, make(chan os.Signal, 1))
+	row := events.WrapRequestZnn{Id: types.Hash{1}, NetworkClass: definition.EvmClass, ChainId: 1, Amount: big.NewInt(2), Fee: big.NewInt(1)}
+	for _, tc := range []struct {
+		name  string
+		key   []byte
+		write func() error
+	}{
+		{"wrap row", getWrapEventKey(row.Id), func() error { return durable.AddWrapRequest(row) }},
+		{"redeem status", redeemStatusKey(1, row.Id), func() error {
+			return durable.ApplyRedeemLog(1, row.Id, 10, 0, common.PendingRedeemStatus)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fail.Store(true)
+			if err := tc.write(); !errors.Is(err, errJournalSync) {
+				t.Fatalf("first write error = %v, want journal sync failure", err)
+			}
+			if present, err := raw.Has(tc.key, nil); err != nil || present {
+				t.Fatalf("failed sync left data visible: present=%t, err=%v", present, err)
+			}
+
+			before := syncs.Load()
+			if err := tc.write(); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if syncs.Load() <= before {
+				t.Fatal("retry completed without syncing")
+			}
+			if present, err := raw.Has(tc.key, nil); err != nil || !present {
+				t.Fatalf("synced retry: present=%t, err=%v", present, err)
+			}
+		})
 	}
 }
