@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/zenon-network/go-zenon/common/types"
 	"golang.org/x/sync/semaphore"
@@ -34,6 +35,11 @@ type GlobalState struct {
 	stateMu                sync.Mutex
 	persistEmergency       func(uint8) error
 	emergencyWritePending  bool
+	redeemIncidents        RedeemIncidentStore
+	acknowledgedRedeems    map[RedeemLogID]bool // fixed before RestoreRedeemIncidents
+	redeemHaltPending      atomic.Uint64
+	redeemWriteFailed      bool
+	redeemGeneration       uint64 // guarded by stateMu
 	frontierMomentumHeight uint64
 	frontierMomSemaphore   *semaphore.Weighted
 	lastCeremony           CeremonyWindow
@@ -69,6 +75,9 @@ func NewPersistentGlobalState(state *uint8, persistEmergency func(uint8) error) 
 func (gs *GlobalState) SetState(newState uint8) error {
 	gs.stateMu.Lock()
 	defer gs.stateMu.Unlock()
+	if gs.RedeemHaltGeneration() != 0 && newState != EmergencyState {
+		return nil // The incident owns the halt until all explicit flags are set.
+	}
 	return gs.setStateLocked(newState)
 }
 
@@ -78,6 +87,9 @@ func (gs *GlobalState) SetState(newState uint8) error {
 func (gs *GlobalState) SetStateIf(expected, newState uint8) (bool, error) {
 	gs.stateMu.Lock()
 	defer gs.stateMu.Unlock()
+	if gs.RedeemHaltGeneration() != 0 && newState != EmergencyState {
+		return false, nil // The incident owns the halt until all explicit flags are set.
+	}
 	if *gs.state != expected {
 		return false, nil
 	}
@@ -86,6 +98,7 @@ func (gs *GlobalState) SetStateIf(expected, newState uint8) (bool, error) {
 }
 
 func (gs *GlobalState) setStateLocked(newState uint8) error {
+	oldEffective := gs.effectiveStateLocked()
 	previous := *gs.state
 	if previous == EmergencyState && newState != EmergencyState && newState != HaltedState {
 		return errors.New("emergency halt is still pending")
@@ -101,10 +114,22 @@ func (gs *GlobalState) setStateLocked(newState uint8) error {
 		}
 	}
 	gs.emergencyWritePending = persistErr != nil
-	GlobalLogger.Infof("Old state: %s, New state: %s\n", StateToText(*gs.state), StateToText(newState))
 	*gs.state = newState
-	gs.Health.SetBridgeState(StateToText(newState))
+	gs.publishStateLocked(oldEffective)
 	return persistErr
+}
+
+func (gs *GlobalState) effectiveStateLocked() uint8 {
+	if gs.RedeemHaltGeneration() != 0 {
+		return EmergencyState
+	}
+	return *gs.state
+}
+
+func (gs *GlobalState) publishStateLocked(oldState uint8) {
+	current := StateToText(gs.effectiveStateLocked())
+	GlobalLogger.Infof("Old state: %s, New state: %s", StateToText(oldState), current)
+	gs.Health.SetBridgeState(current)
 }
 
 // A receive retried after a storage error may by then be historical. Even
@@ -146,7 +171,7 @@ func (gs *GlobalState) WhileSigningTransfers(do func()) bool {
 func (gs *GlobalState) GetState() (uint8, error) {
 	gs.stateMu.Lock()
 	defer gs.stateMu.Unlock()
-	return *gs.state, nil
+	return gs.effectiveStateLocked(), nil
 }
 
 func (gs *GlobalState) SetFrontierMomentum(frMom uint64) error {
