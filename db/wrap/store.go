@@ -60,7 +60,6 @@ func NewDurableZnnStorage(raw *leveldb.DB, stopChan chan os.Signal) db.ZnnStorag
 // from, so the write itself has to be on disk first. Syncing some later write
 // would not do: an earlier one can sit in a journal file that LevelDB has
 // already closed without a sync.
-//
 func (es *eventStore) putDurable(key, value []byte) error {
 	if es.raw == nil {
 		return es.DB.Put(key, value)
