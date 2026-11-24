@@ -420,6 +420,8 @@ func observeLiveUnwrap(t *testing.T, p *signingPeer, key *ecdsa.PrivateKey, onFi
 		}
 		return keysign.Response{Status: tcommon.Success, Signatures: []keysign.Signature{{Msg: r.Messages[0], Signature: base64.StdEncoding.EncodeToString(sig[:64])}}}, nil
 	}
+	// This fixture starts the live loop directly, after startup has completed.
+	p.node.state.CompleteStartup()
 	done := make(chan struct{})
 	go func() { defer close(done); p.node.processSignatures() }()
 	select {
