@@ -98,16 +98,15 @@ func TestReconcileLookupFailureRecovery(t *testing.T) {
 	}
 }
 
-// Each isolated signer receives the same six events for the same signing round.
-// Only the endpoint's stable view of log 0 differs. Observe candidate pools
-// before handing anything to a threshold signer.
+// Peers can select different complete candidate pools at different stable
+// bridge tips. TestRequestsAtSigningTransport checks the certificate gate
+// before these candidate lists can produce bridge-signature requests.
 func TestSameCeremonyDifferentStableBridgeTips(t *testing.T) {
 	for _, peers := range []int{2, 3} {
 		t.Run(fmt.Sprintf("%d signers", peers), func(t *testing.T) {
-			var readyPools [][]uint32
-			var checks verification.Comparisons
 			for peer := 0; peer < peers; peer++ {
 				c := newSigner(t)
+				want := []uint32{1, 3, 4, 5}
 				if peer == peers-1 {
 					c.head = func() (*api.AccountBlockMarshal, error) {
 						return frontierBlock(types.BridgeContract, types.Hash{2}, 11), nil
@@ -118,27 +117,13 @@ func TestSameCeremonyDifferentStableBridgeTips(t *testing.T) {
 						}
 						return stableLookup(i)
 					}
+					want = []uint32{0, 1, 3, 4}
 				}
 				ids, ready, err := c.pool(t)
-				// The fixture assigns all but the final peer to the first view.
-				// These counts are independent of the pools returned by Go.
-				supporters := peers - 1
-				if peer == peers-1 {
-					supporters = 1
-				}
-				proceeds := err == nil && ready && len(ids) > 0
-				checks.Equal(fmt.Sprintf("B.can_certify(%dn, %dn)", supporters, peers-supporters), verification.Bool(proceeds), "Bool")
-				if proceeds {
-					readyPools = append(readyPools, ids)
+				if err != nil || !ready || !slices.Equal(ids, want) {
+					t.Errorf("peer %d: pool=%v ready=%v err=%v, want %v", peer, ids, ready, err, want)
 				}
 			}
-			if peers == 2 && len(readyPools) > 0 {
-				t.Errorf("split peers marked pools ready: %v", readyPools)
-			}
-			if peers == 3 && (len(readyPools) != 2 || !slices.Equal(readyPools[0], []uint32{1, 3, 4, 5}) || !slices.Equal(readyPools[1], readyPools[0])) {
-				t.Errorf("expected only the two matching peers to proceed, ready pools: %v", readyPools)
-			}
-			checks.Check(t)
 		})
 	}
 }

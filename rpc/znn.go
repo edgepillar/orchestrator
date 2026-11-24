@@ -259,6 +259,50 @@ func (r *ZnnRpc) UnwrapTokenRequestContext(ctx context.Context, txHash types.Has
 	return request, delay.RedeemableIn, nil
 }
 
+// ReadBridgeFrontier identifies the account block that backs bridge state
+// lookups. Read it through the same endpoint used for reconciliation.
+func (r *ZnnRpc) ReadBridgeFrontier() (types.HashHeight, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ZnnLedgerTimeout)
+	defer cancel()
+	var block *api.AccountBlockMarshal
+	if err := r.settingsClient.CallContext(ctx, &block, "ledger.getFrontierAccountBlock", types.BridgeContract); err != nil {
+		return types.HashHeight{}, err
+	}
+	if block == nil || block.Address != types.BridgeContract || block.Height == 0 || block.Hash.IsZero() {
+		return types.HashHeight{}, errors.New("missing or invalid Zenon bridge frontier block")
+	}
+	return types.HashHeight{Hash: block.Hash, Height: block.Height}, nil
+}
+
+// ReadUnwrapReconciliationStatus checks that the reply refers to the same
+// request. The Zenon RPC sends VM errors with the default server error code.
+func (r *ZnnRpc) ReadUnwrapReconciliationStatus(req *events.UnwrapRequestEvm) (uint32, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ZnnLedgerTimeout)
+	defer cancel()
+	txHash := types.Hash(req.TransactionHash)
+	got, _, err := r.UnwrapTokenRequestContext(ctx, txHash, req.LogIndex)
+	if err != nil {
+		const vmErrorCode = -32000
+		var rpcErr server.Error
+		if errors.Is(err, constants.ErrDataNonExistent) ||
+			(errors.As(err, &rpcErr) && rpcErr.ErrorCode() == vmErrorCode && rpcErr.Error() == constants.ErrDataNonExistent.Error()) {
+			return common.UnredeemedStatus, nil
+		}
+		return 0, err
+	}
+	if got == nil || got.TransactionHash != txHash || got.LogIndex != req.LogIndex ||
+		got.NetworkClass != req.NetworkClass || got.ChainId != req.ChainId {
+		return 0, errors.New("Zenon returned no matching unwrap record")
+	}
+	if got.Revoked != 0 {
+		return common.RevokedStatus, nil
+	}
+	if got.Redeemed != 0 {
+		return common.RedeemedStatus, nil
+	}
+	return common.PendingRedeemStatus, nil
+}
+
 func (r *ZnnRpc) GetAllWrapTokenRequests(pageIndex, pageSize uint32) (*embedded.WrapTokenRequestList, error) {
 	return r.rpcClient.BridgeApi.GetAllWrapTokenRequests(pageIndex, pageSize)
 }
