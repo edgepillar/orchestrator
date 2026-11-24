@@ -16,12 +16,16 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tcommon "github.com/HyperCore-Team/go-tss/common"
 	"github.com/HyperCore-Team/go-tss/conversion"
 	"github.com/HyperCore-Team/go-tss/keysign"
+	ecommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	etypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/zenon-network/go-zenon/chain/nom"
 	zdb "github.com/zenon-network/go-zenon/common/db"
@@ -34,6 +38,7 @@ import (
 	"go.uber.org/zap"
 
 	"orchestrator/common"
+	"orchestrator/common/bridge"
 	"orchestrator/common/config"
 	"orchestrator/common/events"
 	"orchestrator/tss"
@@ -58,15 +63,77 @@ func TestRequestsAtSigningTransport(t *testing.T) {
 const testCeremony uint64 = 17
 
 type signingPeer struct {
-	chain      *fixtureCeremony
-	node       *Node
-	messages   []string
-	commitment string
-	requests   int
+	chain        *fixtureCeremony
+	bridgeHeight *atomic.Uint64
+	node         *Node
+	messages     []string
+	commitment   string
+	requests     int
 }
 
 func newSigningPeer(t *testing.T, tip byte, key string) *signingPeer {
 	return buildSigningPeer(t, tip, key, "")
+}
+
+const (
+	signingUnwrapHeight = 100
+	signingUnwrapDepth  = 3
+)
+
+type signingUnwrapSource struct {
+	receipts map[ecommon.Hash]*etypes.Receipt
+}
+
+func newSigningUnwrapSource(t *testing.T, requests []*events.UnwrapRequestEvm) *signingUnwrapSource {
+	t.Helper()
+	contract, err := bridge.BridgeMetaData.GetAbi()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts := make(map[ecommon.Hash]*etypes.Receipt)
+	sender := ecommon.Address{1}
+	for _, request := range requests {
+		receipt := receipts[request.TransactionHash]
+		if receipt == nil {
+			receipt = &etypes.Receipt{
+				TxHash:      request.TransactionHash,
+				BlockHash:   ecommon.Hash{1},
+				BlockNumber: big.NewInt(signingUnwrapHeight),
+				Status:      etypes.ReceiptStatusSuccessful,
+			}
+			receipts[request.TransactionHash] = receipt
+		}
+		data, err := contract.Events["Unwrapped"].Inputs.NonIndexed().Pack(request.To, request.Amount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt.Logs = append(receipt.Logs, &etypes.Log{
+			BlockNumber: signingUnwrapHeight,
+			BlockHash:   receipt.BlockHash,
+			TxHash:      request.TransactionHash,
+			Index:       uint(request.LogIndex),
+			Topics:      []ecommon.Hash{common.UnwrapSigHash, ecommon.BytesToHash(sender[:]), ecommon.BytesToHash(request.Token[:])},
+			Data:        data,
+		})
+	}
+	return &signingUnwrapSource{receipts: receipts}
+}
+
+func (s *signingUnwrapSource) GetTransactionReceipt(hash ecommon.Hash) *etypes.Receipt {
+	return s.receipts[hash]
+}
+
+func (s *signingUnwrapSource) GetBlockByNumber(height hexutil.Uint64, _ bool) map[string]any {
+	var hash ecommon.Hash
+	switch height {
+	case signingUnwrapHeight:
+		hash = ecommon.Hash{1}
+	case signingUnwrapHeight + signingUnwrapDepth:
+		hash = ecommon.Hash{2}
+	default:
+		return nil
+	}
+	return map[string]any{"hash": hash, "number": height}
 }
 
 func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, ordered ...fixtureNetwork) *signingPeer {
@@ -78,8 +145,11 @@ func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, order
 	c := signerWithEvents(t, events)
 	c.ceremony = &fixtureCeremony{height: testCeremony * 10, size: 10}
 	c.signingKey = activeBridgeKey
+	bridgeHeight := new(atomic.Uint64)
+	bridgeHeight.Store(uint64(10 + tip))
 	c.head = func() (*api.AccountBlockMarshal, error) {
-		return frontierBlock(types.BridgeContract, types.Hash{tip}, uint64(10+tip)), nil
+		height := bridgeHeight.Load()
+		return frontierBlock(types.BridgeContract, types.Hash{tip, byte(height)}, height), nil
 	}
 	if tip == 2 {
 		c.lookup = func(i uint32) (*definition.UnwrapTokenRequest, error) {
@@ -89,6 +159,35 @@ func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, order
 			return stableLookup(i)
 		}
 	}
+	evidence := events
+	if len(ordered) > 0 {
+		evidence = nil
+		chainByTransaction := make(map[types.Hash]uint32)
+		for _, source := range ordered {
+			requests, err := source.store.GetUnsignedUnwrapRequests()
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence = append(evidence, requests...)
+			for _, request := range requests {
+				chainByTransaction[types.Hash(request.TransactionHash)] = request.ChainId
+			}
+		}
+		lookup := c.lookup
+		c.lookupRequest = func(hash types.Hash, index uint32) (*definition.UnwrapTokenRequest, error) {
+			chain, ok := chainByTransaction[hash]
+			if !ok {
+				return nil, errors.New("unexpected transaction")
+			}
+			record, err := lookup(index)
+			if record != nil {
+				record.TransactionHash = hash
+				record.ChainId = chain
+			}
+			return record, err
+		}
+	}
+	c.unwrapEvidence = newSigningUnwrapSource(t, evidence)
 	// All signers receive the same six valid transfers. Independently encode
 	// the four expected bridge messages to distinguish them from a commitment.
 	order := []int{1, 3, 4, 5}
@@ -105,6 +204,9 @@ func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, order
 	}
 	state := common.NewGlobalState(new(uint8))
 	networks, _ := c.openNetworks(t, state, ordered...)
+	for _, source := range networks.Networks() {
+		source.SetConfirmationsToFinality(signingUnwrapDepth)
+	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -118,9 +220,10 @@ func buildSigningPeer(t *testing.T, tip byte, key, activeBridgeKey string, order
 		t.Fatal(err)
 	}
 	return &signingPeer{
-		chain:    c.ceremony,
-		node:     &Node{networksManager: networks, tssManager: manager, state: state, logger: zap.NewNop().Sugar()},
-		messages: messages,
+		chain:        c.ceremony,
+		bridgeHeight: bridgeHeight,
+		node:         &Node{networksManager: networks, tssManager: manager, state: state, logger: zap.NewNop().Sugar()},
+		messages:     messages,
 	}
 }
 
@@ -465,6 +568,16 @@ func TestLiveLoopRetriesExpiredUnwrap(t *testing.T) {
 
 func TestEmergencyAfterAgreementStopsBridgeSigning(t *testing.T) {
 	f := newWindowTransport(t)
+	completeHaltAndResume := func() {
+		t.Helper()
+		// The production state machine waits for a completed halt before
+		// an administrator can resume the bridge.
+		for _, next := range []uint8{common.HaltedState, common.LiveState} {
+			if err := f.first.node.state.SetState(next); err != nil {
+				t.Fatalf("set state %d: %v", next, err)
+			}
+		}
+	}
 	f.onAgreement = func() {
 		if err := f.first.node.state.SetState(common.EmergencyState); err != nil {
 			t.Fatal(err)
@@ -476,9 +589,7 @@ func TestEmergencyAfterAgreementStopsBridgeSigning(t *testing.T) {
 	}
 	// The state can also change while the signer is fetching its final
 	// window snapshot. A state check made before that read is too early.
-	if err := f.first.node.state.SetState(common.LiveState); err != nil {
-		t.Fatal(err)
-	}
+	completeHaltAndResume()
 	f.onAgreement = func() {
 		chain := f.first.chain
 		chain.mu.Lock()
@@ -494,11 +605,23 @@ func TestEmergencyAfterAgreementStopsBridgeSigning(t *testing.T) {
 		t.Fatalf("emergency during final chain read: bridge requests=%d err=%v", f.bridgeCalls, err)
 	}
 	f.onAgreement = nil
-	if err := f.first.node.state.SetState(common.LiveState); err != nil {
-		t.Fatal(err)
-	}
+	completeHaltAndResume()
 	if err := f.first.attempt(t, 1751, 100); err != nil || f.bridgeCalls != 1 {
 		t.Fatalf("live signer could not retry original pool: bridge requests=%d err=%v", f.bridgeCalls, err)
+	}
+}
+
+func TestBridgeFrontierAdvanceStopsSigning(t *testing.T) {
+	f := newWindowTransport(t)
+	f.onAgreement = func() { f.first.bridgeHeight.Add(1) }
+	err := f.first.attempt(t, 1750, 100)
+	if err == nil || !strings.Contains(err.Error(), "bridge frontier changed before unwrap signing") ||
+		len(f.commitments) != 1 || f.bridgeCalls != 0 {
+		t.Fatalf("bridge changed during agreement: commitments=%d requests=%d err=%v", len(f.commitments), f.bridgeCalls, err)
+	}
+	f.onAgreement = nil
+	if err := f.first.attempt(t, 1750, 100); err != nil || f.bridgeCalls != 1 {
+		t.Fatalf("retry at the stable bridge frontier: requests=%d err=%v", f.bridgeCalls, err)
 	}
 }
 
@@ -613,6 +736,7 @@ func TestNetworkLoadOrderAtSigningTransport(t *testing.T) {
 		for _, r := range requests {
 			r.To = types.ZeroAddress.String()
 			r.ChainId = chain
+			r.TransactionHash = ecommon.Hash{byte(chain)}
 		}
 	}
 	// Logs 0 and 2 are already registered. Three signing slots leave one

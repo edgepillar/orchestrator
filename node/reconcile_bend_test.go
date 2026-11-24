@@ -78,10 +78,10 @@ func TestReconcileAgreesWithBend(t *testing.T) {
 }
 
 // Exercise both frontier reads against the same six persisted logs. A failed
-// closing read must also discard the known statuses staged by earlier batches.
+// closing read must also discard the known statuses staged during the scan.
 func TestReconcileBridgeViewAgreesWithBend(t *testing.T) {
 	var cases verification.Comparisons
-	for _, scenario := range []string{"stable", "changed", "opening read failed", "closing read failed", "changed during agreement"} {
+	for _, scenario := range []string{"stable", "changed", "opening read failed", "closing read failed"} {
 		chain := newSigner(t)
 		reads := 0
 		chain.head = func() (*api.AccountBlockMarshal, error) {
@@ -89,7 +89,7 @@ func TestReconcileBridgeViewAgreesWithBend(t *testing.T) {
 			switch {
 			case reads == 1 && scenario == "opening read failed", reads == 2 && scenario == "closing read failed":
 				return nil, errors.New("frontier unavailable")
-			case reads == 2 && scenario == "changed", reads == 3 && scenario == "changed during agreement":
+			case reads == 2 && scenario == "changed":
 				return frontierBlock(types.BridgeContract, types.Hash{2}, 11), nil
 			default:
 				return frontierBlock(types.BridgeContract, types.Hash{1}, 10), nil
