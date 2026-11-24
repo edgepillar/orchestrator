@@ -492,6 +492,35 @@ func (m *NetworksManager) targets(batch EvmBatch, signatures ...[][]byte) ([]bat
 
 ///////// state
 
+// ConfirmRedeemHalt acknowledges the incident only after observing the explicit
+// halt flags on Zenon and each EVM network in the same membership snapshot.
+func (m *NetworksManager) ConfirmRedeemHalt(state *common.GlobalState, generation uint64) (bool, error) {
+	networks := m.networks()
+	info, err := m.Znn().GetBridgeInfo()
+	if err != nil || info == nil || !info.Halted {
+		return false, err
+	}
+	checked := make(map[uint32]bool, len(networks))
+	for _, network := range networks {
+		if halted, err := network.EvmRpc().HaltFlagSet(); err != nil || !halted {
+			return false, err
+		}
+		checked[network.ChainId()] = true
+	}
+
+	// Runtime network startup can report an incident before publication. Keep
+	// membership stable while the store checks every pending incident's chain.
+	m.evmMu.RLock()
+	defer m.evmMu.RUnlock()
+	if !slices.Equal(m.evmNetworks, networks) {
+		return false, nil
+	}
+	if err := state.CompleteEmergencyHalt(generation, checked); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (m *NetworksManager) CountNetworksHaltState() (int, int, error) {
 	halted, unhalted := 0, 0
 	for _, network := range m.networks() {
@@ -775,7 +804,7 @@ func (m *NetworksManager) SendHaltEvm(batch EvmBatch, signatures [][]byte, ecdsa
 	ok := true
 	for _, target := range targets {
 		network, idx := target.network, target.index
-		halted, err := network.IsHalted()
+		halted, err := network.EvmRpc().HaltFlagSet()
 		if err != nil {
 			return false, err
 		}
@@ -846,7 +875,7 @@ func (m *NetworksManager) SendHaltEvmAdministrator(batch EvmBatch, idx int, ecds
 		m.logger.Infof("network with chainId %d was removed by the bridge; it needs no halt", network.ChainId())
 		return true, nil
 	}
-	halted, err := network.IsHalted()
+	halted, err := network.EvmRpc().HaltFlagSet()
 	if err != nil {
 		return false, err
 	}
