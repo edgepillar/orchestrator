@@ -51,6 +51,9 @@ func (eN *evmNetwork) registerRedeem(log etypes.Log, live bool) error {
 			if _, err := eN.verifyRedeemLog(log, eN.ConfirmationsToFinality()); err != nil {
 				return err
 			}
+			if err := eN.reconcileLegacyOpenRedeem(log, redeem.Nonce, id); err != nil {
+				return err
+			}
 			store := eN.dbManager.ZnnStorage()
 			if err := store.ApplyRedeemLog(eN.ChainId(), id, log.BlockNumber, log.Index, common.PendingRedeemStatus); err != nil {
 				return err
@@ -118,6 +121,26 @@ func (eN *evmNetwork) registerRedeem(log etypes.Log, live bool) error {
 	eN.logger.Warnf("Verified unmatched redeem: chain %d, block %d (%s), transaction %s, log %d, wrap %s, halt pending %v",
 		eN.ChainId(), log.BlockNumber, log.BlockHash, log.TxHash, log.Index, id, eN.state.RedeemHaltGeneration() != 0)
 	return nil
+}
+
+// reconcileLegacyOpenRedeem only changes a terminal hint from an older
+// store after finalized contract state proves this registration is still open.
+func (eN *evmNetwork) reconcileLegacyOpenRedeem(log etypes.Log, nonce *big.Int, id types.Hash) error {
+	store := eN.dbManager.ZnnStorage()
+	legacy, err := store.HasUnpositionedTerminalRedeem(eN.ChainId(), id)
+	if err != nil || !legacy {
+		return err
+	}
+	confirmations := eN.ConfirmationsToFinality()
+	open, err := eN.EvmRpc().RedeemOpenAtFinalHeight(nonce, log.BlockNumber, confirmations)
+	if err != nil || !open {
+		return err
+	}
+	// Bind the proof to the same registration after the state reads.
+	if _, err := eN.verifyRedeemLog(log, confirmations); err != nil {
+		return err
+	}
+	return store.RestoreLegacyPendingRedeem(eN.ChainId(), id)
 }
 
 // redeemSettled asks every endpoint whether, at the confirmation-deep height,

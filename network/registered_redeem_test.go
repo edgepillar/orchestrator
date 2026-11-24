@@ -738,3 +738,48 @@ func TestRedeemFinalizesWhileSubscriptionIsUnavailable(t *testing.T) {
 		time.Sleep(time.Millisecond * 10)
 	}
 }
+
+func TestCanonicalReplayReconcilesLegacyTerminalRedeem(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		closedAt   uint64
+		positioned bool
+		pruned     bool
+		want       uint32
+		wantErr    bool
+	}{
+		{name: "open at final height", want: common.PendingRedeemStatus},
+		{name: "closed at final height", closedAt: 110, want: common.RedeemedStatus},
+		{name: "newer positioned outcome", positioned: true, pruned: true, want: common.RedeemedStatus},
+		{name: "final state unavailable", pruned: true, want: common.RedeemedStatus, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &redeemSource{synced: true}
+			n, reg, chain := redeemFixture(t, src)
+			src.wrap = sourceRequestFor(reg)
+			chain.contract.closedAt.Store(tc.closedAt)
+			chain.contract.pruned.Store(tc.pruned)
+
+			legacy := common.ZnnWrapToOrchestratorWrap(src.wrap)
+			legacy.RedeemStatus = common.RedeemedStatus
+			legacy.Signature = "saved"
+			legacy.SentSignature = true
+			store := n.dbManager.ZnnStorage()
+			if err := store.AddWrapRequest(legacy); err != nil {
+				t.Fatal(err)
+			}
+			if tc.positioned {
+				if err := store.ApplyRedeemLog(1, legacy.Id, reg.BlockNumber+1, 0, common.RedeemedStatus); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := n.InterpretLog(reg, false); (err != nil) != tc.wantErr {
+				t.Fatalf("replay error = %v, want error %t", err, tc.wantErr)
+			}
+			got, err := store.GetWrapRequestById(legacy.Id)
+			if err != nil || got == nil || got.RedeemStatus != tc.want || got.Signature != "saved" || !got.SentSignature {
+				t.Fatalf("replayed wrap = %+v, want status %d and saved signature, err=%v", got, tc.want, err)
+			}
+		})
+	}
+}
