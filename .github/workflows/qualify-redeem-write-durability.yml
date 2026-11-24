@@ -1,0 +1,98 @@
+name: Qualify redeem write durability
+on:
+  push:
+    branches:
+      - codex/linux-pr26-redeem-write-durability
+    paths:
+      - .github/workflows/qualify-redeem-write-durability.yml
+
+permissions:
+  contents: read
+
+jobs:
+  durability:
+    name: Linux ARM64 journal sync fault
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 16
+    env:
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GOFLAGS: "-mod=readonly"
+    steps:
+      - name: Check out the exact durability candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: 1415990dfcb6c62cf03a83c07fed00c5f227e38c
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Verify the source pin
+        shell: bash
+        run: |
+          test "$(uname -s)-$(uname -m)" = Linux-aarch64
+          test "$(git rev-parse HEAD)" = 1415990dfcb6c62cf03a83c07fed00c5f227e38c
+          test "$(git rev-parse HEAD^{tree})" = 8b60aec684c881b831ee8f58bd45f33ec0e3b4d8
+          test "$(git rev-parse HEAD^)" = b01ff11808b302cb9630f61921d615e54be9f7a6
+          git log -1 --format='SOURCE_COMMIT=%H SOURCE_TREE=%T'
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.22.12"
+          cache: false
+
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          gofmt -d db/wrap/store.go db/wrap/redeem_status_test.go
+          test -z "$(gofmt -l db/wrap/store.go db/wrap/redeem_status_test.go)"
+
+      - name: Run the storage regression tests
+        shell: bash
+        run: |
+          test "$(go version)" = 'go version go1.22.12 linux/arm64'
+          go version
+          go test -race -p 2 -count=1 -timeout=4m -v \
+            -ldflags '-extldflags=-Wl,--allow-multiple-definition' \
+            ./db/wrap ./db/manager ./db/unwrap \
+            | sed -e "s|$RUNNER_TEMP|<runner-temp>|g" -e "s|$GITHUB_WORKSPACE|<source>|g"
+
+      - name: Confirm the tests catch the original failed-sync behavior
+        shell: bash
+        run: |
+          fixture="$(mktemp -d "$RUNNER_TEMP/journal-control.XXXXXXXX")"
+          git show b01ff11808b302cb9630f61921d615e54be9f7a6:db/wrap/store.go > "$fixture/store.go"
+          python3 - "$fixture" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          fixture = Path(sys.argv[1])
+          (fixture / "overlay.json").write_text(json.dumps({
+              "Replace": {str(Path("db/wrap/store.go").resolve()): str(fixture / "store.go")},
+          }))
+          PY
+          rc=0
+          go test -race -count=1 -timeout=3m -json -vet=off \
+            -ldflags '-extldflags=-Wl,--allow-multiple-definition' \
+            -overlay "$fixture/overlay.json" \
+            -run '^TestRedeemWritesRetryAfterJournalSyncFailure$' ./db/wrap \
+            > "$fixture/results.jsonl" || rc=$?
+          test "$rc" = 1
+          python3 - "$fixture/results.jsonl" <<'PY'
+          import json
+          import sys
+
+          expected = {
+              "TestRedeemWritesRetryAfterJournalSyncFailure/wrap_row",
+              "TestRedeemWritesRetryAfterJournalSyncFailure/redeem_status",
+          }
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              rows = [json.loads(line) for line in stream]
+          failed = {row.get("Test") for row in rows if row["Action"] == "fail"}
+          observed = {row.get("Test") for row in rows if "failed sync left data visible" in row.get("Output", "")}
+          assert expected <= failed and expected <= observed
+          for name in sorted(expected):
+              print("CONTROL_REPRODUCED", name)
+          PY
