@@ -1,4 +1,4 @@
-name: Compare redeem recovery and held startup with current dev
+name: Qualify the completed merge and isolate inherited unwrap failures
 on:
   push:
     branches:
@@ -18,17 +18,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: Current dev baseline
-            sha: 14fedccf0e4858c55140c9163cb3b0a78a09bb39
-            parent: 86978c2818ae278344bfabb5da17beba80b8652e
+          - label: Combined source with live startup fixture
+            sha: 2aaa98c9e1a64a14ac78f2682abd47f75e480ebb
+            parent: db028cba665de2c832cc7c7462e2b3a48cf890ae
             merge_parent: ""
-            expected_tree: e5aea726c5da4cb3acacfe8cfbbd27036843620e
-            candidate: false
-          - label: Combined PR 26 and PR 29
-            sha: db028cba665de2c832cc7c7462e2b3a48cf890ae
-            parent: 7d16a1aa2a1e5f0cbd347d52811d326d0edd9705
-            merge_parent: 539305c8e5cd9f0aa2e7ff8d9e98853da7108ff9
-            expected_tree: 49c5df1766fa6f342218df5b68b00ae926e0eb03
+            expected_tree: b23ddb139a14972f380ed0e1268fa17cb486a7c0
+            candidate: true
+          - label: Combined source with verified unwrap fixes
+            sha: 6346864d6c687fdbb34883215be0666de6ec7c8b
+            parent: 2aaa98c9e1a64a14ac78f2682abd47f75e480ebb
+            merge_parent: ""
+            expected_tree: 6629128c37d9f9ec3736f52dab543cccfca77c67
             candidate: true
     env:
       CGO_ENABLED: "1"
@@ -152,8 +152,8 @@ jobs:
         if: matrix.candidate
         shell: bash
         run: |
-          gofmt -d common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go
-          test -z "$(gofmt -l common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go)"
+          gofmt -d common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go verification/testdata/split_tip_transport_test.go
+          test -z "$(gofmt -l common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go verification/testdata/split_tip_transport_test.go)"
 
       - name: Run the full race-enabled Bend suite
         shell: bash
