@@ -23,7 +23,7 @@ jobs:
       - name: Check out the exact recovery candidate
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: d5ec01de364fb7550e1106413802b1fa0edc3e72
+          ref: 6fd0da12ff4bc8f1ba4dc2c4021de27915ed2571
           persist-credentials: false
           fetch-depth: 6
 
@@ -31,8 +31,8 @@ jobs:
         shell: bash
         run: |
           test "$(uname -s)-$(uname -m)" = Linux-aarch64
-          test "$(git rev-parse HEAD)" = d5ec01de364fb7550e1106413802b1fa0edc3e72
-          test "$(git rev-parse HEAD^{tree})" = a8d802e560c7276c7e367f4cfb45ebd2c9f8b6eb
+          test "$(git rev-parse HEAD)" = 6fd0da12ff4bc8f1ba4dc2c4021de27915ed2571
+          test "$(git rev-parse HEAD^{tree})" = 77b0789308133252142acbe51e54be9f8cf27b43
           git merge-base --is-ancestor b01ff11808b302cb9630f61921d615e54be9f7a6 HEAD
           git log -1 --format='SOURCE_COMMIT=%H SOURCE_TREE=%T'
 
@@ -45,8 +45,8 @@ jobs:
       - name: Check Go formatting
         shell: bash
         run: |
-          gofmt -d db/interfaces.go db/wrap/redeem_status.go db/wrap/redeem_status_test.go db/wrap/store.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go
-          test -z "$(gofmt -l db/interfaces.go db/wrap/redeem_status.go db/wrap/redeem_status_test.go db/wrap/store.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go)"
+          gofmt -d db/interfaces.go db/wrap/redeem_incident_test.go db/wrap/redeem_status.go db/wrap/redeem_status_test.go db/wrap/store.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go
+          test -z "$(gofmt -l db/interfaces.go db/wrap/redeem_incident_test.go db/wrap/redeem_status.go db/wrap/redeem_status_test.go db/wrap/store.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go)"
 
       - name: Run the storage regression tests
         shell: bash
