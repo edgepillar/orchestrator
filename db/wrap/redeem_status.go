@@ -8,6 +8,7 @@ import (
 	"github.com/zenon-network/go-zenon/common/types"
 	"github.com/zenon-network/go-zenon/vm/embedded/definition"
 
+	"orchestrator/common"
 	"orchestrator/common/events"
 )
 

@@ -123,9 +123,6 @@ func (eN *evmNetwork) registerRedeem(log etypes.Log, live bool) error {
 	return nil
 }
 
-// redeemSettled asks every endpoint whether, at the confirmation-deep height,
-// the registration in an incident is closed and was followed by an
-// administrator unhalt.
 // reconcileLegacyOpenRedeem only changes a terminal hint from an older
 // store after finalized contract state proves this registration is still open.
 func (eN *evmNetwork) reconcileLegacyOpenRedeem(log etypes.Log, nonce *big.Int, id types.Hash) error {
@@ -146,6 +143,9 @@ func (eN *evmNetwork) reconcileLegacyOpenRedeem(log etypes.Log, nonce *big.Int, 
 	return store.RestoreLegacyPendingRedeem(eN.ChainId(), id)
 }
 
+// redeemSettled asks every endpoint whether, at the confirmation-deep height,
+// the registration in an incident is closed and was followed by an
+// administrator unhalt.
 func (eN *evmNetwork) redeemSettled(incident common.RedeemIncident) (bool, error) {
 	redeem, err := eN.EvmRpc().Bridge().ParseRegisteredRedeem(incident.Log)
 	if err != nil {
