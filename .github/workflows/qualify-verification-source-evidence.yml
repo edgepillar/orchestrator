@@ -19,8 +19,8 @@ jobs:
       matrix:
         include:
           - label: Signing verification fixtures
-            sha: 9f49490b2d1da90e20ca82357c8e00b33ba0ed89
-            tree: 2d08f6e6a39b73e1a134c57441fa659dd74f7c18
+            sha: bbb71a53b47ffd912dd75e44b9517c8a97b29168
+            tree: cf07ae612650c34153406f71e7065bb0d04421ea
     env:
       CGO_ENABLED: "1"
       GOTOOLCHAIN: local
