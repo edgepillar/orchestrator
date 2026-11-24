@@ -1,4 +1,4 @@
-name: Qualify redeem write durability
+name: Qualify redeem recovery regressions
 on:
   push:
     branches:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   durability:
-    name: Linux ARM64 journal sync fault
+    name: Linux ARM64 redeem recovery regressions
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 16
     env:
@@ -20,20 +20,20 @@ jobs:
       GOWORK: "off"
       GOFLAGS: "-mod=readonly"
     steps:
-      - name: Check out the exact durability candidate
+      - name: Check out the exact recovery candidate
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: 1415990dfcb6c62cf03a83c07fed00c5f227e38c
+          ref: d5ec01de364fb7550e1106413802b1fa0edc3e72
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 6
 
       - name: Verify the source pin
         shell: bash
         run: |
           test "$(uname -s)-$(uname -m)" = Linux-aarch64
-          test "$(git rev-parse HEAD)" = 1415990dfcb6c62cf03a83c07fed00c5f227e38c
-          test "$(git rev-parse HEAD^{tree})" = 8b60aec684c881b831ee8f58bd45f33ec0e3b4d8
-          test "$(git rev-parse HEAD^)" = b01ff11808b302cb9630f61921d615e54be9f7a6
+          test "$(git rev-parse HEAD)" = d5ec01de364fb7550e1106413802b1fa0edc3e72
+          test "$(git rev-parse HEAD^{tree})" = a8d802e560c7276c7e367f4cfb45ebd2c9f8b6eb
+          git merge-base --is-ancestor b01ff11808b302cb9630f61921d615e54be9f7a6 HEAD
           git log -1 --format='SOURCE_COMMIT=%H SOURCE_TREE=%T'
 
       - name: Set up Go
@@ -45,8 +45,8 @@ jobs:
       - name: Check Go formatting
         shell: bash
         run: |
-          gofmt -d db/wrap/store.go db/wrap/redeem_status_test.go
-          test -z "$(gofmt -l db/wrap/store.go db/wrap/redeem_status_test.go)"
+          gofmt -d db/interfaces.go db/wrap/redeem_status.go db/wrap/redeem_status_test.go db/wrap/store.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go
+          test -z "$(gofmt -l db/interfaces.go db/wrap/redeem_status.go db/wrap/redeem_status_test.go db/wrap/store.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go)"
 
       - name: Run the storage regression tests
         shell: bash
@@ -55,14 +55,15 @@ jobs:
           go version
           go test -race -p 2 -count=1 -timeout=4m -v \
             -ldflags '-extldflags=-Wl,--allow-multiple-definition' \
-            ./db/wrap ./db/manager ./db/unwrap \
+            -run 'Test(Redeem|CatchupRedeem|CanonicalReplay|WrapRows|ExplicitRewind|Registration|HaltSignatures|HistoricalRedeem|Settled|SourceReply|ConfirmingReply)' ./db/wrap ./db/manager ./db/unwrap ./network ./rpc \
             | sed -e "s|$RUNNER_TEMP|<runner-temp>|g" -e "s|$GITHUB_WORKSPACE|<source>|g"
 
-      - name: Confirm the tests catch the original failed-sync behavior
+      - name: Confirm the tests catch the original recovery failures
         shell: bash
         run: |
           fixture="$(mktemp -d "$RUNNER_TEMP/journal-control.XXXXXXXX")"
           git show b01ff11808b302cb9630f61921d615e54be9f7a6:db/wrap/store.go > "$fixture/store.go"
+          git show b01ff11808b302cb9630f61921d615e54be9f7a6:network/registered_redeem.go > "$fixture/registered_redeem.go"
           python3 - "$fixture" <<'PY'
           import json
           from pathlib import Path
@@ -70,14 +71,17 @@ jobs:
 
           fixture = Path(sys.argv[1])
           (fixture / "overlay.json").write_text(json.dumps({
-              "Replace": {str(Path("db/wrap/store.go").resolve()): str(fixture / "store.go")},
+              "Replace": {
+                  str(Path("db/wrap/store.go").resolve()): str(fixture / "store.go"),
+                  str(Path("network/registered_redeem.go").resolve()): str(fixture / "registered_redeem.go"),
+              },
           }))
           PY
           rc=0
           go test -race -count=1 -timeout=3m -json -vet=off \
             -ldflags '-extldflags=-Wl,--allow-multiple-definition' \
             -overlay "$fixture/overlay.json" \
-            -run '^TestRedeemWritesRetryAfterJournalSyncFailure$' ./db/wrap \
+            -run '^Test(RedeemWritesRetryAfterJournalSyncFailure|CanonicalReplayReconcilesLegacyTerminalRedeem)$' ./db/wrap ./network \
             > "$fixture/results.jsonl" || rc=$?
           test "$rc" = 1
           python3 - "$fixture/results.jsonl" <<'PY'
@@ -87,11 +91,13 @@ jobs:
           expected = {
               "TestRedeemWritesRetryAfterJournalSyncFailure/wrap_row",
               "TestRedeemWritesRetryAfterJournalSyncFailure/redeem_status",
+              "TestCanonicalReplayReconcilesLegacyTerminalRedeem/open_at_final_height",
+              "TestCanonicalReplayReconcilesLegacyTerminalRedeem/final_state_unavailable",
           }
           with open(sys.argv[1], encoding="utf-8") as stream:
               rows = [json.loads(line) for line in stream]
           failed = {row.get("Test") for row in rows if row["Action"] == "fail"}
-          observed = {row.get("Test") for row in rows if "failed sync left data visible" in row.get("Output", "")}
+          observed = {row.get("Test") for row in rows if any(marker in row.get("Output", "") for marker in ("failed sync left data visible", "replayed wrap =", "replay error"))}
           assert expected <= failed and expected <= observed
           for name in sorted(expected):
               print("CONTROL_REPRODUCED", name)
