@@ -1,4 +1,4 @@
-name: Qualify the completed merge and isolate inherited unwrap failures
+name: Qualify PR 26 against dev with PR 29
 on:
   push:
     branches:
@@ -18,17 +18,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: Merged source after halt fixture fixes
-            sha: ba477254c82ba7dcf64e33be1f21f600b840df41
-            parent: 813d5245628987d3d2f0b2ba2f9d847d7b0a4af0
+          - label: Current dev with PR 29
+            sha: 8cabdfb6230d97b52948b5f5aa49b0ec9ab53989
+            parent: 14fedccf0e4858c55140c9163cb3b0a78a09bb39
             merge_parent: ""
-            expected_tree: c7a47747742317da34d8608dd2f435a63ec484a3
-            candidate: true
-          - label: Merged unwrap diagnostic after halt fixture fixes
-            sha: 1e10000387b97b7d862ee0dc7c5318e377808640
+            expected_tree: 153e7ce7136ce720987409271877070b48d3b9c8
+            candidate: false
+          - label: PR 26 integrated with current dev
+            sha: eca3cc90ce0a82656ea2dccb9ce1e5a4007ddb8c
             parent: ba477254c82ba7dcf64e33be1f21f600b840df41
-            merge_parent: ""
-            expected_tree: 9b8bcbd04642f6d52273409b8b73dcb0b96a2622
+            merge_parent: 8cabdfb6230d97b52948b5f5aa49b0ec9ab53989
+            expected_tree: c7a47747742317da34d8608dd2f435a63ec484a3
             candidate: true
     env:
       CGO_ENABLED: "1"
@@ -156,6 +156,7 @@ jobs:
           test -z "$(gofmt -l common/global_state.go common/redeem_incident_test.go db/interfaces.go db/unwrap/entries.go db/unwrap/entries_test.go db/wrap/entries.go db/wrap/redeem_status_test.go db/wrap/store.go network/evm.go network/manager.go network/redeem_detection_test.go node/node.go verification/testdata/split_tip_transport_test.go network/startup_hold_test.go network/startup_networks_test.go)"
 
       - name: Stress the startup and administrator halt regressions
+        if: matrix.candidate
         shell: bash
         run: |
           result="$RUNNER_TEMP/halt-regressions.log"
