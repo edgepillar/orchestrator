@@ -73,46 +73,64 @@ func (r *EvmRpc) RedeemSettledAfterHalt(nonce *big.Int, registeredAt, confirmati
 	if err != nil || !anySettled {
 		return false, err
 	}
-	head, err := r.lowestHead()
+	view, finalHeight, err := r.finalRedeemView(nonce, registeredAt, confirmations)
 	if err != nil {
 		return false, err
 	}
+	if !view.settledAfter(registeredAt) {
+		return false, fmt.Errorf("the redeem is settled in the latest state but not yet at block %d", finalHeight)
+	}
+	return true, nil
+}
+
+// RedeemOpenAtFinalHeight proves that a particular registration is still
+// open in the agreed contract state at the required confirmation depth.
+func (r *EvmRpc) RedeemOpenAtFinalHeight(nonce *big.Int, registeredAt, confirmations uint64) (bool, error) {
+	view, _, err := r.finalRedeemView(nonce, registeredAt, confirmations)
+	if err != nil {
+		return false, err
+	}
+	return view.closedAt.Cmp(math.MaxBig256) != 0, nil
+}
+
+func (r *EvmRpc) finalRedeemView(nonce *big.Int, registeredAt, confirmations uint64) (redeemView, uint64, error) {
+	head, err := r.lowestHead()
+	if err != nil {
+		return redeemView{}, 0, err
+	}
 	if head < confirmations || head-confirmations < registeredAt {
-		return false, errors.New("the redeem registration is not final on every endpoint yet")
+		return redeemView{}, 0, errors.New("the redeem registration is not final on every endpoint yet")
 	}
 	finalHeight := head - confirmations
 	headHash, err := r.CanonicalHash(head)
 	if err != nil {
-		return false, err
+		return redeemView{}, 0, err
 	}
 	finalHash, err := r.CanonicalHash(finalHeight)
 	if err != nil {
-		return false, err
+		return redeemView{}, 0, err
 	}
 	final, err := r.redeemViews(nonce, finalHash)
 	if err != nil {
-		return false, fmt.Errorf("at block %d (%s): %w", finalHeight, finalHash, err)
+		return redeemView{}, 0, fmt.Errorf("at block %d (%s): %w", finalHeight, finalHash, err)
 	}
 	for _, at := range []struct {
 		height uint64
 		hash   ecommon.Hash
 	}{{finalHeight, finalHash}, {head, headHash}} {
 		if after, err := r.CanonicalHash(at.height); err != nil || after != at.hash {
-			return false, fmt.Errorf("block %d changed while the redeem state was read: %v", at.height, err)
+			return redeemView{}, 0, fmt.Errorf("block %d changed while the redeem state was read: %v", at.height, err)
 		}
 	}
 	for _, view := range final {
 		if err := view.check(registeredAt); err != nil {
-			return false, err
+			return redeemView{}, 0, err
 		}
 		if view.closedAt.Cmp(final[0].closedAt) != 0 || view.unhaltedAt.Cmp(final[0].unhaltedAt) != 0 {
-			return false, fmt.Errorf("EVM endpoints disagree on the redeem state at block %d", finalHeight)
+			return redeemView{}, 0, fmt.Errorf("EVM endpoints disagree on the redeem state at block %d", finalHeight)
 		}
 	}
-	if !final[0].settledAfter(registeredAt) {
-		return false, fmt.Errorf("the redeem is settled in the latest state but not yet at block %d", finalHeight)
-	}
-	return true, nil
+	return final[0], finalHeight, nil
 }
 
 // RedeemSettledInLatestState reports whether any endpoint shows the redeem
