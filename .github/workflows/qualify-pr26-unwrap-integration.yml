@@ -20,12 +20,8 @@ jobs:
         include:
           - label: PR 26 with unwrap reconciliation and status protection
             sha: ${{ github.sha }}
-            parent: fb5dbc3491c7afd7c8df0d5a5acadb73840c89b9
+            parent: ffffc5e20fe93f552f9695e7ef6da5baee29a058
             expected_tree: ""
-          - label: Current dev baseline with detailed verification
-            sha: 14fedccf0e4858c55140c9163cb3b0a78a09bb39
-            parent: 86978c2818ae278344bfabb5da17beba80b8652e
-            expected_tree: e5aea726c5da4cb3acacfe8cfbbd27036843620e
     env:
       CGO_ENABLED: "1"
       GOTOOLCHAIN: local
@@ -148,7 +144,6 @@ jobs:
           test -z "$(gofmt -l node/node.go rpc/znn.go node/reconcile_test.go node/reconcile_bend_test.go node/reconcile_signers_test.go verification/testdata/split_tip_transport_test.go verification/signing_requests_test.go db/interfaces.go db/unwrap/entries.go network/manager.go db/wrap/redeem_status.go network/registered_redeem.go network/registered_redeem_test.go rpc/redeem_settlement.go)"
 
       - name: Run the full race-enabled Bend suite
-        if: ${{ !cancelled() && steps.proofs.outcome == 'success' }}
         shell: bash
         run: |
           events="$RUNNER_TEMP/qualification.jsonl"
