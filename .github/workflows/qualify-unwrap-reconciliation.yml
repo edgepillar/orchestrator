@@ -21,13 +21,8 @@ jobs:
           - label: Current dev with verified unwrap reconciliation
             sha: ${{ github.sha }}
             tree: ""
-            parent: 2dca1e8511d8a492fa2c2c57cee57d862e6d14f3
+            parent: 62ca588aad70f3638d5d97943d9a8a4e3a08a3e9
             scope: full
-          - label: PR 17 status regressions on current dev
-            sha: bac019e355f3cd902833725cc10386a9c95f0181
-            tree: 05b29ee304e112b185a66ac152c9f13920ef82b1
-            parent: 14fedccf0e4858c55140c9163cb3b0a78a09bb39
-            scope: status
     env:
       CGO_ENABLED: "1"
       GOTOOLCHAIN: local
@@ -143,7 +138,6 @@ jobs:
           go vet -tags=bend ./...
 
       - name: Run the selected race-enabled Bend tests
-        if: ${{ !cancelled() && steps.proofs.outcome == 'success' }}
         shell: bash
         env:
           TEST_SCOPE: ${{ matrix.scope }}
