@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -259,14 +260,19 @@ func (e *heldEvm) event() etypes.Log {
 	return e.bridge.sourceLog(e.t, to)
 }
 
-// haltedSelector is the call the signer makes to ask a bridge contract
-// whether it is halted.
-func haltedSelector(t *testing.T) []byte {
+// isHaltRead recognizes both the effective halt read used during startup and
+// the explicit halt flag used when confirming a redeem incident.
+func isHaltRead(t *testing.T, input []byte) bool {
+	t.Helper()
+	if len(input) < 4 {
+		return false
+	}
 	contract, err := bridge.BridgeMetaData.GetAbi()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return contract.Methods["isHalted"].ID
+	return bytes.Equal(input[:4], contract.Methods["isHalted"].ID) ||
+		bytes.Equal(input[:4], contract.Methods["halted"].ID)
 }
 
 func (e *heldEvm) answer(method string, params []json.RawMessage) (interface{}, *replayRPCError) {
@@ -286,7 +292,7 @@ func (e *heldEvm) answer(method string, params []json.RawMessage) (interface{}, 
 		if len(params) < 1 || json.Unmarshal(params[0], &call) != nil {
 			e.t.Errorf("unexpected call %s", params)
 		}
-		if selector := append(call.Data, call.Input...); len(selector) >= 4 && string(selector[:4]) == string(haltedSelector(e.t)) {
+		if isHaltRead(e.t, append(call.Data, call.Input...)) {
 			if hook := e.onHaltedRead.Swap(nil); hook != nil {
 				(*hook)()
 			}
@@ -350,6 +356,31 @@ func (e *heldEvm) answer(method string, params []json.RawMessage) (interface{}, 
 
 var heldAdministrator = types.Address{7}
 
+// heldReplayStores lets the listener publish a new test network while an
+// existing network's scan or redeem watcher reads its own store.
+type heldReplayStores struct {
+	replayStores
+	mu sync.RWMutex
+}
+
+func (s *heldReplayStores) EvmStorage(id uint32) db.EvmStorage {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.replayStores.EvmStorage(id)
+}
+
+func (s *heldReplayStores) HasEvmStorage(id uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.replayStores.HasEvmStorage(id)
+}
+
+func (s *heldReplayStores) setEvmStorage(id uint32, store db.EvmStorage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.evm[id] = store
+}
+
 // heldStart is a signer with one EVM network (chain 1) whose networks are
 // started the way the node starts them. The EVM cursor is at block 90, behind
 // the block that holds the unwrap event.
@@ -362,7 +393,7 @@ type heldStart struct {
 	n        *znnNetwork
 	net      *evmNetwork // chain 1
 	zenonURL string
-	stores   replayStores
+	stores   heldReplayStores
 	stop     chan os.Signal
 	elapsed  atomic.Int64 // added to the signer's clock
 	// How often the signer applied bridge metadata, and the pool size in
@@ -393,14 +424,14 @@ func newHeldStart(t *testing.T) *heldStart {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.stores = replayStores{znn: wrap.NewZnnStorage(zdb.NewMemDB(), h.stop), evm: map[uint32]db.EvmStorage{}}
+	h.stores = heldReplayStores{replayStores: replayStores{znn: wrap.NewZnnStorage(zdb.NewMemDB(), h.stop), evm: map[uint32]db.EvmStorage{}}}
 	state := common.NewGlobalState(new(uint8))
 	state.Health = snapshot.New("test", "")
 	if err := state.SetFrontierMomentum(h.zenon.frontier); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	h.n = &znnNetwork{listenerCtx: ctx, cancelListener: cancel, dbManager: h.stores, rpcManager: rpcs, state: state,
+	h.n = &znnNetwork{listenerCtx: ctx, cancelListener: cancel, dbManager: &h.stores, rpcManager: rpcs, state: state,
 		stopChan: h.stop, logger: zap.NewNop().Sugar(), retryPause: 30 * time.Millisecond,
 		setBridgeMetadata: func(metadata *common.BridgeMetadata) {
 			h.appliedPool.Store(int64(metadata.SignCeremonyPoolSize))
@@ -434,7 +465,7 @@ func (h *heldStart) addEvmNetwork(id uint32, url string) *evmNetwork {
 	if err := h.n.rpcManager.AddEvmClient(config.BaseNetworkConfig{Urls: []string{url}}, id, name, h.bridge.contract); err != nil {
 		h.t.Fatal(err)
 	}
-	h.stores.evm[id] = unwrap.NewEvmStorage(zdb.NewMemDB(), h.stop, 90)
+	h.stores.setEvmStorage(id, unwrap.NewEvmStorage(zdb.NewMemDB(), h.stop, 90))
 	params, err := config.NewEvmParams(&definition.NetworkInfo{NetworkClass: definition.EvmClass, Id: id, Name: name, ContractAddress: h.bridge.contract.Hex()})
 	if err != nil {
 		h.t.Fatal(err)
@@ -443,7 +474,7 @@ func (h *heldStart) addEvmNetwork(id uint32, url string) *evmNetwork {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	network := &evmNetwork{EvmParams: params, dbManager: h.stores, rpcManager: h.n.rpcManager, unconfirmedQueue: queue,
+	network := &evmNetwork{EvmParams: params, dbManager: &h.stores, rpcManager: h.n.rpcManager, unconfirmedQueue: queue,
 		client: h.n.rpcManager.Evm(id), state: h.n.state, stopChan: h.stop, logger: zap.NewNop().Sugar(), done: make(chan struct{})}
 	h.m.AddEvmNetwork(network)
 	return network
@@ -535,7 +566,7 @@ func (h *heldStart) cursor() uint64 {
 
 func (h *heldStart) evmCursor() uint64 {
 	h.t.Helper()
-	height, err := h.stores.evm[1].GetLastUpdateHeight()
+	height, err := h.stores.EvmStorage(1).GetLastUpdateHeight()
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -612,7 +643,7 @@ func TestHeldStartupLetsTheEvmScanRecordTheSource(t *testing.T) {
 	}
 	h.retries(3)
 	h.expect("before the scan", common.LiveState, 1, false)
-	if row, err := h.stores.evm[1].GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0); err != nil || row != nil {
+	if row, err := h.stores.EvmStorage(1).GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0); err != nil || row != nil {
 		t.Fatalf("a row was stored for a request that is not checked yet: %v, err %v", row, err)
 	}
 
@@ -622,7 +653,7 @@ func TestHeldStartupLetsTheEvmScanRecordTheSource(t *testing.T) {
 	if h.net.aheadOfBridgeAccount() {
 		t.Fatal("the network still takes its scan to be ahead of the bridge account")
 	}
-	row, err := h.stores.evm[1].GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0)
+	row, err := h.stores.EvmStorage(1).GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0)
 	if err != nil || row == nil {
 		t.Fatalf("stored row %v, err %v", row, err)
 	}
@@ -650,14 +681,14 @@ func TestHeldStartupLetsARequestedBackfillRun(t *testing.T) {
 	h.watchedFrom(2)
 	// This signer recorded the event in a block that is no longer the
 	// canonical one, and its EVM cursor is past the event.
-	if err := h.stores.evm[1].AddUnwrapRequest(events.UnwrapRequestEvm{
+	if err := h.stores.EvmStorage(1).AddUnwrapRequest(events.UnwrapRequestEvm{
 		NetworkClass: definition.EvmClass, ChainId: 1, BlockNumber: 100, BlockHash: ecommon.HexToHash("0xdead"),
 		TransactionHash: h.bridge.txHash, LogIndex: 0, From: ecommon.HexToAddress("0x03"),
 		To: h.bridge.recipient.String(), Token: h.bridge.token, Amount: big.NewInt(100), RedeemStatus: common.UnredeemedStatus,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.stores.evm[1].SetLastUpdateHeight(200); err != nil {
+	if err := h.stores.EvmStorage(1).SetLastUpdateHeight(200); err != nil {
 		t.Fatal(err)
 	}
 	h.m.SetEvmBackfillBlocks(150)
@@ -670,7 +701,7 @@ func TestHeldStartupLetsARequestedBackfillRun(t *testing.T) {
 	h.evm.open()
 	waitFor(t, "startup to complete", h.complete)
 	h.expect("after the backfill", common.LiveState, 2, true)
-	row, err := h.stores.evm[1].GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0)
+	row, err := h.stores.EvmStorage(1).GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0)
 	if err != nil || row == nil || row.BlockHash != h.bridge.blockHash || row.RedeemStatus != common.PendingRedeemStatus {
 		t.Fatalf("stored row %+v, err %v; want the registered request in the canonical block", row, err)
 	}
@@ -865,7 +896,7 @@ func TestEvmNetworkThatFailsBesideAHeldStartStopsASignerThatIsSigningTransfers(t
 	h.unwrapReceive()
 	h.watchedFrom(2)
 	// The store's cursor is ahead of the chain, which the scan refuses.
-	if err := h.stores.evm[1].SetLastUpdateHeight(900); err != nil {
+	if err := h.stores.EvmStorage(1).SetLastUpdateHeight(900); err != nil {
 		t.Fatal(err)
 	}
 	h.evm.open()
@@ -891,7 +922,7 @@ func TestEvmNetworkThatFailsBesideASignerInAnEmergencyIsStartedAgain(t *testing.
 	h.evm.open()
 	h.setState(common.EmergencyState)
 	h.plainReceive()
-	if err := h.stores.evm[1].SetLastUpdateHeight(900); err != nil {
+	if err := h.stores.EvmStorage(1).SetLastUpdateHeight(900); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.start(); err != nil {
@@ -905,7 +936,7 @@ func TestEvmNetworkThatFailsBesideASignerInAnEmergencyIsStartedAgain(t *testing.
 	if h.scansFinished() || h.complete() {
 		t.Fatal("startup counts as complete with an EVM network that did not start")
 	}
-	if err := h.stores.evm[1].SetLastUpdateHeight(90); err != nil {
+	if err := h.stores.EvmStorage(1).SetLastUpdateHeight(90); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "startup to complete", h.complete)
@@ -1045,7 +1076,7 @@ func TestSettingsChangeStopsAHeldSignerInAnEmergencyOnceItHasHalted(t *testing.T
 	if transfers, err := h.net.unwrapRequestsFromLog(log, nil); err == nil {
 		t.Fatalf("the network fixed affiliate settings for an event while the node's settings may be out of date: %d transfers", len(transfers))
 	}
-	if _, pinned, err := h.stores.evm[1].UnwrapAffiliatePolicy(affiliateEvidenceKey(log)); err != nil || pinned {
+	if _, pinned, err := h.stores.EvmStorage(1).UnwrapAffiliatePolicy(affiliateEvidenceKey(log)); err != nil || pinned {
 		t.Fatalf("affiliate settings fixed %v, err %v", pinned, err)
 	}
 
@@ -1267,15 +1298,15 @@ func TestHeldStartupJudgesARequestTheScanCannotInterpret(t *testing.T) {
 	h.evm.open()
 	waitFor(t, "the request to be judged", func() bool { return replayState(t, h.n) == common.EmergencyState })
 	waitFor(t, "the receive to be checkpointed", func() bool { return h.cursor() == blocked })
-	if _, pinned, err := h.stores.evm[1].UnwrapAffiliatePolicy(affiliateEvidenceKey(h.evm.event())); err != nil || pinned {
+	if _, pinned, err := h.stores.EvmStorage(1).UnwrapAffiliatePolicy(affiliateEvidenceKey(h.evm.event())); err != nil || pinned {
 		t.Fatalf("affiliate settings were fixed for an event whose request disagrees with them: %v, err %v", pinned, err)
 	}
 	// What the scan left is where the event is, not a record of the request:
 	// that is for the receive to write, and this one was refused.
-	if number, hash, found, err := h.stores.evm[1].UnwrapSourceLocation(h.bridge.txHash, 0); err != nil || !found || number != 100 || hash != h.bridge.blockHash {
+	if number, hash, found, err := h.stores.EvmStorage(1).UnwrapSourceLocation(h.bridge.txHash, 0); err != nil || !found || number != 100 || hash != h.bridge.blockHash {
 		t.Fatalf("recorded location: block %d %s, found %v, err %v", number, hash, found, err)
 	}
-	if row, err := h.stores.evm[1].GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0); err != nil || row != nil {
+	if row, err := h.stores.EvmStorage(1).GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0); err != nil || row != nil {
 		t.Fatalf("a record was stored for a request that has no matching source event: %+v, err %v", row, err)
 	}
 }
@@ -1392,7 +1423,7 @@ func TestHeldStartupKeepsEarlierRequestsAsFirstReadHistory(t *testing.T) {
 	if lookups := h.evm.receipts.Load(); lookups != 0 {
 		t.Fatalf("%d source lookups for an old request on a first read", lookups)
 	}
-	if row, err := h.stores.evm[1].GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0); err != nil || row == nil {
+	if row, err := h.stores.EvmStorage(1).GetUnwrapRequestByHashAndLog(h.bridge.txHash, 0); err != nil || row == nil {
 		t.Fatalf("the old request was not stored: %v, err %v", row, err)
 	}
 	if got := h.watch(); got != last+1 {
@@ -1658,7 +1689,7 @@ func TestScanAheadOfTheBridgeAccountAsksTheBridgeForTheRegisteredRequest(t *test
 				}
 			})
 			if tc.local {
-				if err := h.stores.evm[1].AddUnwrapRequest(events.UnwrapRequestEvm{
+				if err := h.stores.EvmStorage(1).AddUnwrapRequest(events.UnwrapRequestEvm{
 					NetworkClass: definition.EvmClass, ChainId: 1, BlockNumber: 100, BlockHash: h.bridge.blockHash,
 					TransactionHash: h.bridge.txHash, LogIndex: 0, From: ecommon.HexToAddress("0x03"),
 					To: h.bridge.recipient.String(), Token: h.bridge.token, Amount: big.NewInt(101), RedeemStatus: common.UnredeemedStatus,
@@ -1673,7 +1704,7 @@ func TestScanAheadOfTheBridgeAccountAsksTheBridgeForTheRegisteredRequest(t *test
 			h.net.bridgeRead = read
 
 			transfers, err := h.net.unwrapRequestsFromLog(log, nil)
-			_, pinned, storeErr := h.stores.evm[1].UnwrapAffiliatePolicy(affiliateEvidenceKey(log))
+			_, pinned, storeErr := h.stores.EvmStorage(1).UnwrapAffiliatePolicy(affiliateEvidenceKey(log))
 			if storeErr != nil {
 				t.Fatal(storeErr)
 			}

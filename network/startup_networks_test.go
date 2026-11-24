@@ -117,7 +117,7 @@ func TestEvmNetworkWaitingForItsNodeDoesNotHoldBackTheOthers(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the second network to scan to the head", func() bool {
-		height, err := h.stores.evm[2].GetLastUpdateHeight()
+		height, err := h.stores.EvmStorage(2).GetLastUpdateHeight()
 		return err == nil && height == 200
 	})
 	if h.scansFinished() || h.complete() {
@@ -264,11 +264,11 @@ func TestAffiliateSettingsChangedDuringTheReadAreNotFixed(t *testing.T) {
 	read := make(chan struct{})
 	close(read)
 	h.net.bridgeRead = read
-	store := &hookedEvmStore{EvmStorage: h.stores.evm[1]}
+	store := &hookedEvmStore{EvmStorage: h.stores.EvmStorage(1)}
 	store.onRead = func() {
 		h.n.state.SetIsAffiliateProgram(common.AffiliateProgram{Networks: map[uint32]common.AffiliateNetwork{1: {StartingHeight: 1}}})
 	}
-	h.stores.evm[1] = store
+	h.stores.setEvmStorage(1, store)
 	log := h.bridge.sourceLog(t, testRecipient+common.AffiliateProgramAddressSeparator+testRecipient)
 
 	transfers, err := h.net.unwrapRequestsFromLog(log, nil)
@@ -353,7 +353,7 @@ func TestUnlistedChainDoesNotConfirmAPolicyOfNoSplit(t *testing.T) {
 	log := h.bridge.sourceLog(t, testRecipient+common.AffiliateProgramAddressSeparator+testRecipient)
 
 	transfers, err := h.net.unwrapRequestsFromLog(log, nil)
-	_, pinned, storeErr := h.stores.evm[1].UnwrapAffiliatePolicy(affiliateEvidenceKey(log))
+	_, pinned, storeErr := h.stores.EvmStorage(1).UnwrapAffiliatePolicy(affiliateEvidenceKey(log))
 	if storeErr != nil {
 		t.Fatal(storeErr)
 	}
