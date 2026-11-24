@@ -44,6 +44,7 @@ type reconciliationChain struct {
 	ceremony       *fixtureCeremony
 	signingKey     string
 	lookup         signerLookup
+	lookupRequest  func(types.Hash, uint32) (*definition.UnwrapTokenRequest, error)
 	write          func(uint32, uint32) error
 	head           func() (*api.AccountBlockMarshal, error)
 	db.EvmStorage
@@ -111,7 +112,7 @@ func (c *fixtureCeremony) set(height, size uint64) {
 
 type fixtureBridge struct {
 	ceremony   *fixtureCeremony
-	lookup     signerLookup
+	lookup     func(types.Hash, uint32) (*definition.UnwrapTokenRequest, error)
 	signingKey string
 }
 
@@ -140,10 +141,7 @@ func (b fixtureBridge) GetAllNetworks(uint32, uint32) *embedded.NetworkInfoList 
 	return &embedded.NetworkInfoList{}
 }
 func (b fixtureBridge) GetUnwrapTokenRequestByHashAndLog(hash types.Hash, index uint32) (*definition.UnwrapTokenRequest, error) {
-	if hash != types.Hash(signerTestTx) {
-		return nil, errors.New("unexpected transaction")
-	}
-	return b.lookup(index)
+	return b.lookup(hash, index)
 }
 
 type fixtureLedger struct {
@@ -211,7 +209,16 @@ func (c reconciliationChain) openNetworks(t *testing.T, state *common.GlobalStat
 	t.Helper()
 	t.Setenv("HOME", t.TempDir()) // isolate the EVM network's disk queue
 	srv := server.NewServer()
-	if err := srv.RegisterName("embedded.bridge", fixtureBridge{lookup: c.lookup, signingKey: c.signingKey, ceremony: c.ceremony}); err != nil {
+	lookup := c.lookupRequest
+	if lookup == nil {
+		lookup = func(hash types.Hash, index uint32) (*definition.UnwrapTokenRequest, error) {
+			if hash != types.Hash(signerTestTx) {
+				return nil, errors.New("unexpected transaction")
+			}
+			return c.lookup(index)
+		}
+	}
+	if err := srv.RegisterName("embedded.bridge", fixtureBridge{lookup: lookup, signingKey: c.signingKey, ceremony: c.ceremony}); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.RegisterName("ledger", fixtureLedger{frontier: c.head, ceremony: c.ceremony}); err != nil {
