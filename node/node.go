@@ -1258,17 +1258,18 @@ func (node *Node) processSignaturesUnwrap(number, size uint64) (error, bool) {
 	if err != nil {
 		return err, true
 	}
-	requests, complete, err := node.reconcileUnsignedUnwrapRequests(requests)
+	selection, err := node.reconcileUnsignedUnwrapRequests(requests)
 	if err != nil {
 		return err, true
 	}
-	if !complete {
+	if !selection.complete {
 		// Signers with more stale records than the lookup budget would build
 		// a different pool than up-to-date signers; the reconciled statuses
 		// are persisted, so the next ceremony continues from there.
 		node.logger.Info("unwrap reconciliation incomplete for this ceremony, skipping signing until the backlog is worked off")
 		return nil, false
 	}
+	requests = selection.requests
 	if len(requests) == 0 {
 		store.Selected(snapshot.Unwrap, number, map[uint32]int{})
 		return nil, false
@@ -1327,8 +1328,14 @@ func (node *Node) processSignaturesUnwrap(number, size uint64) (error, bool) {
 		if current != ceremony {
 			return errors.New("unwrap ceremony expired before signing")
 		}
-		// The listener can enter emergency mode during agreement or either RPC
-		// read. Check live state last, immediately before requesting signatures.
+		frontier, err := node.networksManager.RpcManager().Znn().ReadBridgeFrontier()
+		if err != nil {
+			return err
+		}
+		if frontier != selection.frontier {
+			return errors.New("bridge frontier changed before unwrap signing")
+		}
+		// Check live state after the RPC reads, immediately before signing.
 		return node.requireLiveTransfers()
 	})
 	if err != nil {
@@ -1378,67 +1385,85 @@ func (node *Node) processSignaturesUnwrap(number, size uint64) (error, bool) {
 // of the pool size.
 const reconcileLookupsPerPool = 4
 
-// reconcileUnsignedUnwrapRequests removes from the signing pool every event
-// that Zenon already knows about, recording its Zenon status locally. Such
-// events exist when this node missed the ceremony that signed them (offline,
-// lost the event, or the record was reset), and left in the pool they make
-// this node propose a different message set than its peers. The TSS
-// ceremony only forms a party between signers with an identical set, so one
-// stale entry here keeps this node out of every ceremony until operators
-// wipe and resync the events store.
-//
-// Requests are visited in storage order. The walk stops once enough remain
-// to fill the ceremony pool. It also stops after a bounded number of Zenon
-// lookups; in that case the result is reported as incomplete and the caller
-// skips signing, because a signer with a larger stale backlog than the
-// budget would otherwise select a different pool than its peers. Reconciled
-// statuses are persisted either way, so successive ceremonies work the
-// backlog off. Any Zenon RPC failure aborts the ceremony for this node:
-// guessing would produce a pool its peers do not share.
-func (node *Node) reconcileUnsignedUnwrapRequests(requests []*events.UnwrapRequestEvm) ([]*events.UnwrapRequestEvm, bool, error) {
+type unwrapReconciliation struct {
+	requests []*events.UnwrapRequestEvm
+	frontier types.HashHeight
+	complete bool
+}
+
+// reconcileUnsignedUnwrapRequests selects candidates in storage order. It
+// records known statuses only after the same bridge frontier confirms both
+// ends of the scan. An incomplete pass can still apply verified statuses so
+// the next ceremony can work through the remaining backlog.
+func (node *Node) reconcileUnsignedUnwrapRequests(requests []*events.UnwrapRequestEvm) (unwrapReconciliation, error) {
 	poolSize := common.SignCeremonyPoolSize
-	lookupCap := reconcileLookupsPerPool * poolSize
-	remaining := make([]*events.UnwrapRequestEvm, 0, poolSize)
-	reconciled := 0
+	if poolSize < 0 {
+		return unwrapReconciliation{}, fmt.Errorf("reconcile: negative ceremony pool size %d", poolSize)
+	}
+	if len(requests) == 0 || poolSize == 0 {
+		return unwrapReconciliation{complete: true}, nil
+	}
+	znn := node.networksManager.RpcManager().Znn()
+	frontier, err := znn.ReadBridgeFrontier()
+	if err != nil {
+		return unwrapReconciliation{}, fmt.Errorf("reconcile: opening bridge frontier: %w", err)
+	}
+
+	// Clamp before multiplying to retain the lookup limit for large settings.
+	budget := len(requests)
+	if poolSize <= budget/reconcileLookupsPerPool {
+		budget = poolSize * reconcileLookupsPerPool
+	}
+	type statusUpdate struct {
+		request *events.UnwrapRequestEvm
+		status  uint32
+	}
+	var updates []statusUpdate
+	selected := make([]*events.UnwrapRequestEvm, 0, min(poolSize, len(requests)))
 	lookups := 0
-	complete := true
-	for _, req := range requests {
-		if len(remaining) >= poolSize {
-			break
-		}
-		if lookups >= lookupCap {
-			node.logger.Warnf("reconcile: stopped after %d Zenon lookups with %d records selected; %d reconciled this pass, the rest is worked off in later ceremonies", lookups, len(remaining), reconciled)
-			complete = false
+	var lookupErr error
+	for _, req := range requests[:budget] {
+		if len(selected) == poolSize {
 			break
 		}
 		lookups++
-		rpcReq, err := node.networksManager.GetEvmUnwrapRequestByHashAndLogFromRPC(types.Hash(req.TransactionHash), req.LogIndex)
+		status, err := znn.ReadUnwrapReconciliationStatus(req)
 		if err != nil {
-			if err.Error() == constants.ErrDataNonExistent.Error() {
-				remaining = append(remaining, req)
-				continue
-			}
-			return nil, false, fmt.Errorf("reconcile: cannot query Zenon for event %s/%d: %w", req.TransactionHash.String(), req.LogIndex, err)
+			lookupErr = fmt.Errorf("reconcile: cannot query Zenon for event %s/%d: %w", req.TransactionHash, req.LogIndex, err)
+			break
 		}
-		if rpcReq == nil {
-			remaining = append(remaining, req)
-			continue
+		if status == common.UnredeemedStatus {
+			selected = append(selected, req)
+		} else {
+			updates = append(updates, statusUpdate{request: req, status: status})
 		}
-		status := common.PendingRedeemStatus
-		if rpcReq.Revoked != 0 {
-			status = common.RevokedStatus
-		} else if rpcReq.Redeemed != 0 {
-			status = common.RedeemedStatus
-		}
-		if err := node.networksManager.SetEvmUnwrapRequestStatus(req, status); err != nil {
-			return nil, false, fmt.Errorf("reconcile: event %s/%d exists on Zenon but its local status could not be updated: %w", req.TransactionHash.String(), req.LogIndex, err)
-		}
-		reconciled++
 	}
-	if reconciled > 0 {
-		node.logger.Infof("reconcile: %d unsigned unwrap events already exist on Zenon and were excluded from the pool; %d selected to sign", reconciled, len(remaining))
+
+	closing, err := znn.ReadBridgeFrontier()
+	if err != nil {
+		return unwrapReconciliation{}, fmt.Errorf("reconcile: closing bridge frontier: %w", err)
 	}
-	return remaining, complete, nil
+	if closing != frontier {
+		return unwrapReconciliation{}, errors.New("reconcile: bridge frontier changed during lookups")
+	}
+	// Earlier successful reads can still make progress after a later failed
+	// lookup, provided the frontier check covers those reads.
+	for _, update := range updates {
+		req := update.request
+		if err := node.networksManager.SetEvmUnwrapRequestStatus(req, update.status); err != nil {
+			return unwrapReconciliation{}, fmt.Errorf("reconcile: cannot update local status for event %s/%d: %w", req.TransactionHash, req.LogIndex, err)
+		}
+	}
+	if lookupErr != nil {
+		return unwrapReconciliation{}, lookupErr
+	}
+	complete := len(selected) == poolSize || lookups == len(requests)
+	if !complete {
+		node.logger.Warnf("reconcile: stopped after %d Zenon lookups with %d records selected; %d reconciled this pass, the rest is worked off in later ceremonies", lookups, len(selected), len(updates))
+	} else if len(updates) > 0 {
+		node.logger.Infof("reconcile: %d unsigned unwrap events already exist on Zenon and were excluded from the pool; %d selected to sign", len(updates), len(selected))
+	}
+	return unwrapReconciliation{requests: selected, frontier: frontier, complete: complete}, nil
 }
 
 // Send signatures methods

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	ecommon "github.com/ethereum/go-ethereum/common"
+	gethrpc "github.com/ethereum/go-ethereum/rpc"
 	"github.com/zenon-network/go-zenon/chain/nom"
 	zdb "github.com/zenon-network/go-zenon/common/db"
 	"github.com/zenon-network/go-zenon/common/types"
@@ -38,12 +39,13 @@ import (
 type signerLookup func(uint32) (*definition.UnwrapTokenRequest, error)
 
 type reconciliationChain struct {
-	inProcess  bool
-	ceremony   *fixtureCeremony
-	signingKey string
-	lookup     signerLookup
-	write      func(uint32, uint32) error
-	head       func() (*api.AccountBlockMarshal, error)
+	inProcess      bool
+	unwrapEvidence any
+	ceremony       *fixtureCeremony
+	signingKey     string
+	lookup         signerLookup
+	write          func(uint32, uint32) error
+	head           func() (*api.AccountBlockMarshal, error)
 	db.EvmStorage
 }
 
@@ -182,11 +184,11 @@ func (s fixtureStores) AddEvmEventStore(uint32, string, uint64) (func(), error) 
 }
 func (s fixtureStores) ZnnStorage() db.ZnnStorage { return nil }
 
-func (c reconciliationChain) SetUnwrapRequestStatus(hash ecommon.Hash, i, status uint32) error {
+func (c reconciliationChain) ApplyUnwrapReconciliationStatus(hash ecommon.Hash, i, expected, status uint32) error {
 	if c.write != nil {
 		return c.write(i, status)
 	}
-	return c.EvmStorage.SetUnwrapRequestStatus(hash, i, status)
+	return c.EvmStorage.ApplyUnwrapReconciliationStatus(hash, i, expected, status)
 }
 
 type fixtureNetwork struct {
@@ -233,6 +235,17 @@ func (c reconciliationChain) openNetworks(t *testing.T, state *common.GlobalStat
 		t.Fatal(err)
 	}
 	cfg := config.BaseNetworkConfig{Urls: []string{url}}
+	evmCfg := cfg
+	if c.unwrapEvidence != nil {
+		evmRPC := gethrpc.NewServer()
+		t.Cleanup(evmRPC.Stop)
+		if err := evmRPC.RegisterName("eth", c.unwrapEvidence); err != nil {
+			t.Fatal(err)
+		}
+		evmEndpoint := httptest.NewServer(evmRPC)
+		t.Cleanup(evmEndpoint.Close)
+		evmCfg = config.BaseNetworkConfig{Urls: []string{evmEndpoint.URL}}
+	}
 	var stores *dbmanager.Manager
 	if c.signingKey != "" {
 		stores, err = dbmanager.NewDbManager(stop)
@@ -240,7 +253,7 @@ func (c reconciliationChain) openNetworks(t *testing.T, state *common.GlobalStat
 			t.Fatal(err)
 		}
 	}
-	if err := manager.Init(map[string]config.BaseNetworkConfig{common.ZenonNetworkName: cfg, "fixture": cfg}, stores, state, nil); err != nil {
+	if err := manager.Init(map[string]config.BaseNetworkConfig{common.ZenonNetworkName: cfg, "fixture": evmCfg}, stores, state, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(ordered) == 0 {
@@ -253,7 +266,7 @@ func (c reconciliationChain) openNetworks(t *testing.T, state *common.GlobalStat
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := manager.RpcManager().AddEvmClient(cfg, entry.id, name, ecommon.Address{}); err != nil {
+		if err := manager.RpcManager().AddEvmClient(evmCfg, entry.id, name, ecommon.Address{}); err != nil {
 			t.Fatal(err)
 		}
 		manager.AddEvmNetwork(net)
@@ -279,7 +292,8 @@ func (c reconciliationChain) reconcile(t *testing.T, requests []*events.UnwrapRe
 	common.SignCeremonyPoolSize = slots
 	defer func() { common.SignCeremonyPoolSize = previous }()
 	n := Node{networksManager: manager, logger: zap.NewNop().Sugar()}
-	return n.reconcileUnsignedUnwrapRequests(requests)
+	selection, err := n.reconcileUnsignedUnwrapRequests(requests)
+	return selection.requests, selection.complete, err
 }
 
 func (c reconciliationChain) pool(t *testing.T) ([]uint32, bool, error) {
@@ -319,7 +333,8 @@ func TestReconcileStoppingPoints(t *testing.T) {
 		{"exact budget completes", 1, 4, 4, 4, -1, -1, nil, []uint32{0, 1, 2, 3}, true, nil},
 		{"budget with tail skips signing", 1, 5, 4, 4, -1, -1, nil, []uint32{0, 1, 2, 3}, false, nil},
 		{"first read error stops ordered writes", 4, 6, 6, 4, 1, 2, nil, []uint32{0}, false, providerErr},
-		{"first write error stops ordered writes", 4, 6, 6, 4, 2, 1, nil, []uint32{0, 1}, false, storageErr},
+		// A write failure is observed after the bounded scan and frontier check.
+		{"first write error stops ordered writes", 4, 6, 6, 6, 2, 1, nil, []uint32{0, 1}, false, storageErr},
 		{"empty", 4, 0, 0, 0, -1, -1, nil, nil, true, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
