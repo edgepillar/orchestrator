@@ -1,4 +1,4 @@
-name: Qualify PR 26 against dev with PR 29
+name: Qualify the PR 26 integration with current dev
 on:
   push:
     branches:
@@ -18,17 +18,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: Current dev with PR 29
-            sha: 8cabdfb6230d97b52948b5f5aa49b0ec9ab53989
-            parent: 14fedccf0e4858c55140c9163cb3b0a78a09bb39
+          - label: Current dev with PR 29 and PR 30
+            sha: e2d1d983926eeab1eb6b73b6240c97b342f088c3
+            parent: 8cabdfb6230d97b52948b5f5aa49b0ec9ab53989
             merge_parent: ""
-            expected_tree: 153e7ce7136ce720987409271877070b48d3b9c8
+            expected_tree: 332fd35e9abfa1f48c1caed2dffd9b4b4cf9f4a3
             candidate: false
           - label: PR 26 integrated with current dev
-            sha: eca3cc90ce0a82656ea2dccb9ce1e5a4007ddb8c
-            parent: ba477254c82ba7dcf64e33be1f21f600b840df41
-            merge_parent: 8cabdfb6230d97b52948b5f5aa49b0ec9ab53989
-            expected_tree: c7a47747742317da34d8608dd2f435a63ec484a3
+            sha: f872e98eec3a3e42e95408ccaad91687ec021139
+            parent: eca3cc90ce0a82656ea2dccb9ce1e5a4007ddb8c
+            merge_parent: e2d1d983926eeab1eb6b73b6240c97b342f088c3
+            expected_tree: 27b8f3d6f7c22a268ccf6d266328676ca7242775
             candidate: true
     env:
       CGO_ENABLED: "1"
