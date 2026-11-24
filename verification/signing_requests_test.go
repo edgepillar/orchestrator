@@ -45,6 +45,10 @@ func TestCoherentSigningWindow(t *testing.T) {
 	runSigningTransportTest(t, "TestChangingFrontierCannotAdmitMixedWindow")
 }
 
+func TestBridgeAdvanceDuringAgreementDefersSigning(t *testing.T) {
+	runSigningTransportTest(t, "TestBridgeFrontierAdvanceStopsSigning")
+}
+
 func runSigningTransportTest(t *testing.T, name string) {
 	t.Helper()
 	root, err := filepath.Abs("..")
