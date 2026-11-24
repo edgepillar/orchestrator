@@ -1,0 +1,218 @@
+name: Verify signing fixtures before PR 22
+on:
+  push:
+    branches:
+      - codex/linux-bend-pr26-before-source-gate
+    paths:
+      - .github/workflows/diagnose-verification-before-pr22.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 36
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Before PR 22 source evidence
+            sha: 923465931959b681e26b43e5dbeb9a4a3b327a58
+            tree: 9ad876f112e3be1a9715701a6553a667fb19ff78
+    env:
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GOFLAGS: "-mod=readonly"
+    steps:
+      - name: Check runner and reserve disk space
+        shell: bash
+        run: |
+          test "$(uname -s)-$(uname -m)" = Linux-aarch64
+          df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { exit ($4 < 16777216) }'
+          . /etc/os-release
+          printf 'OS=%s %s ARCH=%s\n' "$ID" "$VERSION_ID" "$(uname -m)"
+
+      - name: Check out the source under test
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: edgepillar/orchestrator
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+
+      - name: Verify the source pin
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ matrix.sha }}
+          SOURCE_TREE: ${{ matrix.tree }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test -z "$(git status --porcelain)"
+          printf 'SOURCE_COMMIT=%s SOURCE_TREE=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.22.12"
+          cache: false
+
+      - name: Install pinned Bend
+        shell: bash
+        run: |
+          test "$(go version)" = 'go version go1.22.12 linux/arm64'
+          go version
+          install_dir="$(mktemp -d "$RUNNER_TEMP/bend.XXXXXXXX")"
+          archive="$install_dir/bend.tar.gz"
+          release_url=https://github.com/bendlang/bend/releases/download/v2.0.40/bend-2.0.40-linux-arm64.tar.gz
+          release_sha=2f42a6fa34ecdaa71ae105e5fa734f9a07e129d333e45448ab6d2ff03a837570
+          curl --fail --silent --show-error --location --proto '=https' \
+            --connect-timeout 15 --max-time 120 --max-filesize 35949294 \
+            --retry 2 --output "$archive" "$release_url"
+          test "$(stat -c %s "$archive")" = 35949294
+          echo "$release_sha  $archive" | sha256sum --check
+          python3 - "$archive" <<'PY'
+          from pathlib import PurePosixPath
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1], "r:gz") as tar:
+              total_size = 0
+              paths = set()
+              for entry in tar:
+                  name = PurePosixPath(entry.name)
+                  assert name.parts and name.parts[0] == "bend"
+                  assert ".." not in name.parts and name not in paths
+                  assert entry.isfile() or entry.isdir()
+                  paths.add(name)
+                  total_size += entry.size
+                  assert len(paths) <= 10000 and total_size <= 256 * 1024 * 1024
+              assert PurePosixPath("bend/bin/bend") in paths
+          PY
+          tar -xzf "$archive" -C "$install_dir" --no-same-owner --no-same-permissions
+          test -x "$install_dir/bend/bin/bend"
+          printf 'BEND_RELEASE=v2.0.40 BEND_SHA256=%s\n' "$release_sha"
+          echo "BEND_HOME=$install_dir/bend" >> "$GITHUB_ENV"
+          echo "$install_dir/bend/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned Lean for BendTT
+        shell: bash
+        run: |
+          install_dir="$(mktemp -d "$RUNNER_TEMP/lean.XXXXXXXX")"
+          archive="$install_dir/lean.tar.zst"
+          release_url=https://github.com/leanprover/lean4/releases/download/v4.34.0/lean-4.34.0-linux_aarch64.tar.zst
+          release_sha=40b04fdb7fb849d3c80e10c3bbeebc7b7354b6d3f07450b9168c2149b40d2a82
+          curl --fail --silent --show-error --location --proto '=https' \
+            --connect-timeout 15 --max-time 180 --max-filesize 581973544 \
+            --retry 2 --output "$archive" "$release_url"
+          test "$(stat -c %s "$archive")" = 581973544
+          echo "$release_sha  $archive" | sha256sum --check
+          tar --zstd -xf "$archive" -C "$install_dir" --strip-components=1 \
+            --no-same-owner --no-same-permissions
+          rm -- "$archive"
+          version="$("$install_dir/bin/lean" --version)"
+          grep -E 'version 4\.34\.0([ ,]|$)' <<< "$version"
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
+
+      - name: Check the Bend model proofs
+        id: proofs
+        shell: bash
+        run: |
+          bend PROOF.bend --verdict | tee "$RUNNER_TEMP/bend-proof.log"
+          grep -Fq 'ALL PROOFS CHECK' "$RUNNER_TEMP/bend-proof.log"
+
+      - name: Rerun the verification tests with diagnostics
+        shell: bash
+        run: |
+          python3 -u - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          
+          suites = [
+              ("verification", "./verification", ["TestSplitTipBridgeSignatureRequestsAgreeWithBend","TestNetworkLoadOrderPreservesUnwrapPool","TestWindowResizePreservesUnwrapProgress","TestLiveSchedulerRecoversExpiredUnwrap","TestRestoredContractWindowPreservesVote","TestMissedResizeRecovery","TestEmergencyBeforeBridgeSigning","TestCoherentSigningWindow"]),
+          ]
+          path_labels = [
+              (os.getenv("RUNNER_TEMP"), "<runner-temp>"),
+              (os.getenv("GITHUB_WORKSPACE"), "<source>"),
+              (os.path.expanduser("~"), "<home>"),
+          ]
+          ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+          token = re.compile(r"(?i)\b(?:gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+)")
+          secret_label = re.compile(r"(?i)\b(?:mnemonic|seed phrase|private key|secret key|access token|authorization|password)\b\s*[:=]")
+          url_auth = re.compile(r"(https?://)[^/\s]+:[^@\s]+@")
+          
+          def sanitized(value):
+              value = ansi.sub("", value)
+              for prefix, name in path_labels:
+                  if prefix:
+                      value = value.replace(prefix, name)
+              value = value.replace("/tmp/", "<tmp>/")
+              value = token.sub("<redacted>", value)
+              value = url_auth.sub(r"\1<redacted>@", value)
+              return "\n".join(
+                  "<credential field redacted>" if secret_label.search(line) else line
+                  for line in value.split("\n")
+              )
+          
+          def emit(phase, row):
+              print("TEST_DIAGNOSTIC " + json.dumps({"phase": phase, **row}, ensure_ascii=True), flush=True)
+          
+          def run(phase, pkg, names):
+              output_cap = 768 * 1024
+              output_seen = 0
+              output_truncated = False
+              package_status = {}
+              root_results = {}
+              args = [
+                  "go", "test", "-json", "-race", "-p", "2", "-count=1", "-timeout=16m",
+                  "-tags=bend", "-buildvcs=false", "-ldflags",
+                  "-extldflags=-Wl,--allow-multiple-definition",
+                  "-run", "^(" + "|".join(names) + ")$", pkg,
+              ]
+              emit(phase, {"action": "begin", "test_count": len(names)})
+              with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+                  for raw in proc.stdout:
+                      data = raw.decode("utf-8", "replace")
+                      try:
+                          event = json.loads(data)
+                      except ValueError:
+                          if data.startswith("go: downloading "):
+                              continue
+                          event = {"Action": "output", "Output": data}
+                      action, test = event.get("Action"), event.get("Test")
+                      row = {"action": action, "package": event.get("Package"), "test": test}
+                      if action in ("pass", "fail", "skip"):
+                          if test is None:
+                              package_status[event.get("Package")] = action
+                          elif "/" not in test:
+                              root_results[test] = action
+                          row["elapsed"] = event.get("Elapsed")
+                          emit(phase, row)
+                      elif action == "output":
+                          message = sanitized(event.get("Output", ""))
+                          if not message.strip():
+                              continue
+                          output_seen += len(raw)
+                          if output_seen <= output_cap and len(message) <= 48 * 1024:
+                              row["output"] = message
+                              emit(phase, row)
+                          elif not output_truncated:
+                              emit(phase, {"action": "output_limit_reached", "bytes": output_seen})
+                              output_truncated = True
+                  exit_code = proc.wait()
+              missing = sorted(set(names) - set(root_results))
+              emit(phase, {"action": "complete", "exit": exit_code, "results": root_results,
+                           "missing": missing, "package_status": package_status,
+                           "output_truncated": output_truncated})
+              return bool(exit_code or missing or output_truncated)
+          
+          failed = False
+          for phase, pkg, wanted in suites:
+              failed |= run(phase, pkg, wanted)
+          sys.exit(int(failed))
+          PY
