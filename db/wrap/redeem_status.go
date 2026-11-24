@@ -79,3 +79,47 @@ func (es *eventStore) decodeWrap(data []byte) (*events.WrapRequestZnn, error) {
 	}
 	return wrap, nil
 }
+
+func (es *eventStore) legacyTerminalWrap(chainID uint32, id types.Hash) (*events.WrapRequestZnn, error) {
+	data, err := es.DB.Get(getWrapEventKey(id))
+	if errors.Is(err, leveldb.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	row, err := events.DeserializeWrapEventZnn(data)
+	if err != nil {
+		return nil, err
+	}
+	if row.NetworkClass != definition.EvmClass || row.ChainId != chainID ||
+		(row.RedeemStatus != common.RedeemedStatus && row.RedeemStatus != common.RevokedStatus) {
+		return nil, nil
+	}
+	last, err := es.readRedeemStatus(redeemStatusKey(chainID, id))
+	if err != nil || (last != nil && last.status >= common.RedeemedStatus) {
+		return nil, err
+	}
+	return row, nil
+}
+
+func (es *eventStore) HasUnpositionedTerminalRedeem(chainID uint32, id types.Hash) (bool, error) {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	row, err := es.legacyTerminalWrap(chainID, id)
+	return row != nil, err
+}
+
+// RestoreLegacyPendingRedeem applies proof that the registration is still
+// open at a finalized block. Re-read the row and the positioned status
+// under the same lock so a verified terminal outcome is preserved.
+func (es *eventStore) RestoreLegacyPendingRedeem(chainID uint32, id types.Hash) error {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	row, err := es.legacyTerminalWrap(chainID, id)
+	if err != nil || row == nil {
+		return err
+	}
+	row.RedeemStatus = common.PendingRedeemStatus
+	return es.putWrap(row)
+}

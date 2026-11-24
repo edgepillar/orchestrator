@@ -49,6 +49,8 @@ type ZnnStorage interface {
 
 	AddWrapRequest(events.WrapRequestZnn) error
 	HasLegacyRedeemStatuses(chainID uint32) (bool, error)
+	HasUnpositionedTerminalRedeem(chainID uint32, id types.Hash) (bool, error)
+	RestoreLegacyPendingRedeem(chainID uint32, id types.Hash) error
 	ApplyRedeemLog(chainID uint32, id types.Hash, block uint64, index uint, status uint32) error
 	SetWrapRequestStatus(types.Hash, uint32) error
 	SetWrapRequestSignature(types.Hash, string) error
